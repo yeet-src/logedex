@@ -1,0 +1,14 @@
+# Keep the build context to what the image actually runs: the agent script, the
+# server, the shared modules and the entrypoint. Nothing is compiled, so there are
+# no build artifacts to exclude -- only local state, history, and things that are
+# deliberately run outside the image.
+**/node_modules
+.git
+scratchpad
+*.log
+server/hosts.json
+# Demo containers are started by demo/run.sh against the host's docker, not from
+# inside this image -- see `make demo`.
+demo
+# The README's demo capture. Not served by the app -- it lives on GitHub.
+assets

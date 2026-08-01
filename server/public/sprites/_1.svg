@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- placeholder: round creature with ears -->
+  <path d="M4 4 L2.5 1 L6 2.4Z" fill="#e8a33d" stroke="#3a2a18" stroke-width=".9" stroke-linejoin="round"/>
+  <path d="M12 4 L13.5 1 L10 2.4Z" fill="#e8a33d" stroke="#3a2a18" stroke-width=".9" stroke-linejoin="round"/>
+  <circle cx="8" cy="9" r="5.4" fill="#f2c14e" stroke="#3a2a18" stroke-width="1"/>
+  <circle cx="6.2" cy="8.2" r=".85" fill="#3a2a18"/>
+  <circle cx="9.8" cy="8.2" r=".85" fill="#3a2a18"/>
+  <path d="M6.6 11.1q1.4 1.1 2.8 0" fill="none" stroke="#3a2a18" stroke-width=".9" stroke-linecap="round"/>
+</svg>

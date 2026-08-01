@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- placeholder: rock creature -->
+  <path d="M3 12.8 L4.6 4.4 L11.4 4.4 L13 12.8Z" fill="#b99a76" stroke="#33261a" stroke-width="1" stroke-linejoin="round"/>
+  <circle cx="6.4" cy="8" r=".85" fill="#33261a"/>
+  <circle cx="9.6" cy="8" r=".85" fill="#33261a"/>
+  <path d="M6.4 10.6h3.2" stroke="#33261a" stroke-width=".9" stroke-linecap="round"/>
+</svg>

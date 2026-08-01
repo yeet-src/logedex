@@ -1,0 +1,17 @@
+# node
+**/node_modules/
+
+# local scratch / logs
+*.log
+scratchpad/
+
+# runtime state: the host list the server persists (HOSTS_FILE) and the alert rules
+# (ALERTS_FILE), plus their atomic-write temp files
+server/hosts.json
+server/hosts.json.tmp
+server/alerts.json
+server/alerts.json.tmp
+
+# python bytecode from the demo generator
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- placeholder: bug -->
+  <path d="M8 2.6 L5.6 .8 M8 2.6 L10.4 .8" stroke="#2b1f38" stroke-width=".9" stroke-linecap="round"/>
+  <ellipse cx="8" cy="8.8" rx="4.9" ry="5.4" fill="#b28ce0" stroke="#2b1f38" stroke-width="1"/>
+  <path d="M3.2 8.8h9.6" stroke="#2b1f38" stroke-width=".8"/>
+  <circle cx="6.2" cy="6.6" r=".8" fill="#2b1f38"/>
+  <circle cx="9.8" cy="6.6" r=".8" fill="#2b1f38"/>
+</svg>

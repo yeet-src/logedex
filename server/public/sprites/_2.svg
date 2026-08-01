@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- placeholder: slime -->
+  <path d="M2 12.6q0-6.4 6-6.4t6 6.4Z" fill="#5fc6d8" stroke="#16333a" stroke-width="1" stroke-linejoin="round"/>
+  <circle cx="6.1" cy="10" r=".8" fill="#16333a"/>
+  <circle cx="9.9" cy="10" r=".8" fill="#16333a"/>
+  <path d="M7 12.2h2" fill="none" stroke="#16333a" stroke-width=".85" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,2017 @@
+/* Logédex — a host sidebar and a row of log panes.
+ *
+ * Built to put several streams next to each other: the panes are a
+ * horizontally-scrolling flex row, so attaching a fourth narrows the others rather
+ * than pushing anything off-screen.
+ *
+ * The look is a terminal, and that's a functional choice as much as an aesthetic
+ * one. Structure comes from alignment and 1px rules rather than cards and shadows,
+ * so nothing competes with the log text.
+ *
+ * ONE COLOUR, and one exception. Everything is greyscale except a single accent, and
+ * the accent means exactly one thing: this is live, selected, or the answer you were
+ * looking for. Severity and container state — the things a palette usually spends hues
+ * on — are carried by LIGHTNESS instead, on the ramp below, because the lines
+ * themselves are the content and competing hues in the chrome argue with them.
+ *
+ * The ramp, dark to light: --dim-2 (barely there) → --dim (labels) → --fg (log text)
+ * → --hi (look at this). Louder means more important, in one dimension.
+ *
+ * The exception is stream identity in a combined pane, where telling four interleaved
+ * streams apart at a glance is the entire job and lightness alone doesn't carry four
+ * values reliably. Those hues are ROTATIONS OF THE ACCENT — same lightness, same
+ * chroma, hue only — so they read as one family rather than as a second palette, and
+ * the accent itself is the first of them. Colour there is an accelerator, never the
+ * only signal: every stream is also labelled in the gutter (see `memberLabels`), so
+ * nothing is lost if the hues are indistinguishable to you. */
+:root {
+  --bg: #0a0a0a;
+  --panel: #101011;
+  --panel-2: #17181a;
+  --line: #232426;
+  --line-2: #313234;
+  --hi: #f2f3f4;             /* the loudest grey: stderr, errors, warnings */
+  --fg: #c8cacc;             /* log text */
+  --dim: #83868b;            /* labels and chrome */
+  --dim-2: #5a5d62;          /* present but not asking for anything */
+  --accent: oklch(.905 .182 98.111);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, "DejaVu Sans Mono", Consolas, monospace;
+
+  /* ── TYPE SCALE ─────────────────────────────────────────────────────────────
+   * Four steps for the interface and one for the logs, and the split is the point: this app
+   * had a 10px–13px chrome, which is small-print sizing for text you are meant to read while
+   * you work — the host you're looking at, whether a stream is live, what the window is. The
+   * chrome is a step and a half up from where it was; the logs are exactly where they were.
+   *
+   * --log is separate because the log body is the one place where fitting more on screen beats
+   * setting it larger, and because `.ts` sizes its column in `ch` — growing the log text would
+   * silently re-measure the timestamp gutter. It's pinned on `.line` rather than left to
+   * inherit from `body`, so raising `--ui` can never drag the lines up with it.
+   *
+   * Anything inheriting from `body` gets --ui for free: buttons, inputs, the pane names, the
+   * sidebar rows, the `×`. The steps below exist for the labels that deliberately sit under
+   * the base — and NOT so they can be tiny, but so the hierarchy survives being scaled. */
+  --ui: 15px;                /* the interface's base: controls, names, anything inheriting */
+  --ui-md: 14px;             /* a secondary block of prose — the gate's copy, an error */
+  --ui-sm: 13px;             /* a label beside something else: chips, states, meta */
+  --ui-xs: 12px;             /* the smallest thing here: a tick under the scrubber */
+  --log: 13px;               /* the log lines, unchanged and deliberately not on the scale */
+
+  /* The four values a theme needs that aren't on the ramp above.
+   *
+   * --chrome is the surface of the *instrument* — the top bar and the host sidebar —
+   * as opposed to --panel, which is cards, menus and the log-line hover. They're the
+   * same colour here and that's why this looks like one flat field, but they answer
+   * different questions, and a theme that paints the instrument needs to move one
+   * without dragging the other: --panel is also what a hovered log line turns, so a
+   * coloured --panel would colour the lines themselves.
+   * --on-accent is text on top of a filled accent, the one place the accent is a
+   * background rather than a mark. It has to be dark in a dark theme and stay legible
+   * against whatever the accent becomes.
+   * --shadow and --scrim are the hard offset shadow and the modal wash, named so a
+   * theme can tint them rather than being stuck with neutral black. */
+  --chrome: var(--panel);
+  --chrome-line: var(--line);
+  /* The sidebar is its own surface, separate from --chrome, because the two stopped being
+   * the same thing: pokédex mode paints the top bar crimson and leaves the container list
+   * pale. Same value here, so yeet mode is one flat field as before. */
+  --sidebar: var(--panel);
+  --on-accent: #0a0a0a;
+  --shadow: #000a;
+  --scrim: #000000b8;
+
+  /* A second colour, and the rule that keeps it from wrecking the first one.
+   *
+   * --accent-2 IS DECORATIVE AND MUST STAY THAT WAY. The accent above means exactly one
+   * thing — this is live, selected, or what you searched for — and that only works
+   * because nothing else in the interface competes for it. So --accent-2 is allowed on
+   * the wordmark, on a background wash, on a focus ring: things that carry no state
+   * about your containers. The moment it marks a stream, a match or a status, there are
+   * two colours meaning "look here" and neither means anything.
+   *
+   * In yeet mode it IS the accent, so that theme stays strictly one-colour and every
+   * rule below is a no-op there. Pokédex mode is where it becomes a real second hue. */
+  --accent-2: var(--accent);
+
+  /* Per-stream marks in a combined pane: the accent, then five rotations of it.
+   *
+   * Ordered by separation, not by going round the wheel. Two and three streams are the
+   * common cases, so the first three sit 120° apart and the rest fill in between —
+   * which means a two-stream pane always gets the most distinguishable pair available.
+   *
+   * FIXED LIGHTNESS, PER-HUE CHROMA. The lightness is identical across h2–h6 so no
+   * stream reads as more important than another, and the chroma is each hue's own
+   * sRGB ceiling rather than one shared number. That asymmetry is the point: sRGB
+   * simply holds less saturated blue than green at a given lightness, so a single
+   * chroma high enough for green pushes blue out of gamut, and a browser mapping it
+   * back in moves its lightness — quietly destroying the one property the set depends
+   * on. Values verified in gamut, 11.5–15:1 against the background, and no two closer
+   * than ΔE 0.10 in OKLab (about twice the threshold where two colours start to be
+   * confusable).
+   *
+   * h1 is the accent itself, at its own lightness — the stream you opened the pane
+   * from, wearing the colour the rest of the interface already uses for "this one". */
+  --h1: var(--accent);              /* hue 98 — the accent itself */
+  --h2: oklch(.84 .115 218);        /* cyan */
+  --h3: oklch(.84 .117 338);        /* pink */
+  --h4: oklch(.84 .187 158);        /* green */
+  --h5: oklch(.84 .076 278);        /* blue — the least saturable of the six */
+  --h6: oklch(.84 .086 38);         /* peach */
+}
+
+/* ── pokédex mode: the light theme ─────────────────────────────────────────────
+ *
+ * yeet mode is dark, pokédex mode is light. The app is called Logédex, so it looks like
+ * the thing it's named after: a pale instrument with a red band across the top.
+ * `data-theme="pokemon"` on <html>; see public/theme.js.
+ *
+ * A theme moves values, never rules — the ramp still runs dim-2 → dim → fg → hi, the
+ * accent still means "live, selected, or the thing you searched for", and there are still
+ * six stream hues. What inverting the field costs is that several of those values had to
+ * be RE-DERIVED rather than swapped, and there are three places where that matters:
+ *
+ * 1. THE RAMP INVERTS. On a dark field, less important means darker (--dim-2 below
+ *    --dim). On a light one it means LIGHTER, so --dim-2 sits above --dim in lightness
+ *    and below it in contrast. Same ordering by prominence, opposite by number.
+ *
+ * 2. THE ANSI PALETTE HAD TO BE REBUILT, further down this file. Log lines carry colour
+ *    straight from the container, and the dark-field palette sits at lightness .75–.87 —
+ *    on this background every one of the twelve lands under 2.3:1, i.e. all of it
+ *    illegible. The light set is re-derived at L=.52/.40 and every colour clears 4.5:1.
+ *    Note that BRIGHT IS DARKER there: on a dark field bright means lighter, so on a
+ *    light one it has to mean darker or "bright" stops meaning "stands out".
+ *
+ * 3. THE STREAM HUES HAD TO BE RE-DERIVED at L=.50, and one of them had to MOVE. The
+ *    dark set's h6 is a peach at hue 38, which on this field lands ΔE 0.081 from the
+ *    accent — close enough to confuse a stream with a status. Rotated to hue 24 it clears
+ *    0.104, and the binding constraint goes back to being the h2/h4 pair, exactly as in
+ *    dark mode.
+ *
+ * THE RED. The top bar keeps the deep crimson and becomes the one dark island in a light
+ * app, which is the device's band across the top. It therefore needs its own ink — see
+ * the `.bar` block below, which is just the dark palette, already verified against this
+ * same crimson. The bright pokéball red stays a 1px rule (--chrome-line): structure from
+ * rules, not fills, same as everywhere else here.
+ *
+ * VERIFIED, not eyeballed, because these are load-bearing claims:
+ *   stream hues on --bg   5.27–6.41:1,  closest pair ΔE 0.104  (h2/h4, as in dark mode)
+ *   ANSI, all 12          4.79–9.70:1  (dark-field palette on this bg: 1.24–2.26:1)
+ *   ANSI backgrounds      pale tints; --fg on them 8.0–8.4:1
+ *   --fg 10.99:1   --hi 16.18:1   --dim 5.61:1   --dim-2 4.73:1   --accent 5.28:1
+ *   --on-accent on --accent 5.44:1   (reverse video, and the search highlight)
+ *   --accent-2 6.36:1 — and here it is the REAL logo blue #3b4cca, unmodified: it was
+ *     drawn for a white page, and this is one.
+ *   every value in sRGB gamut, so nothing is silently mapped and shifted */
+:root[data-theme="pokemon"] {
+  --bg: oklch(.975 .006 85);        /* #f9f6f2 — the page */
+  --panel: oklch(.94 .008 85);      /* cards, menus, the sidebar, a hovered line */
+  --panel-2: oklch(.90 .012 82);
+  --line: oklch(.855 .014 80);
+  --line-2: oklch(.72 .02 70);
+  --chrome: oklch(.32 .13 27);      /* #650006 — the band across the top, and only that */
+  --chrome-line: oklch(.58 .226 29);/* #e11c15 — pokéball red, as a 1px rule only */
+  --hi: oklch(.22 .02 40);          /* the loudest ink: stderr, errors, warnings */
+  --fg: oklch(.34 .015 45);         /* log text */
+  --dim: oklch(.50 .015 45);        /* labels */
+  /* Lighter than --dim on purpose — see (1) above. Pinned at the darkest value that is
+   * still lighter than --dim, because --dim-2 paints input placeholders and those sit on
+   * --panel-2 rather than on the page: 5.07:1 against --bg but 4.11:1 against the fill
+   * they actually appear on. Under 4.5 on that surface, and left there knowingly — the
+   * tension is real (this colour's whole job is to be the quietest thing on screen) and
+   * dark mode is at 2.88:1 in the same spot, so this is the better of the two. Worth
+   * fixing properly in BOTH themes rather than papering over it in one. */
+  --dim-2: oklch(.52 .015 45);
+  --accent: oklch(.52 .114 65);     /* #955907 — the logo yellow, as deep as a light
+                                     * field needs: a true yellow is 2.4:1 here and this
+                                     * colour has to carry text, not just a dot */
+  --accent-2: #3b4cca;              /* the logo blue, unmodified. Decoration and focus
+                                     * only, never state — see --accent-2 above */
+  --on-accent: oklch(.985 .004 85);
+  --shadow: oklch(.45 .04 40 / .28);/* warm and soft; hard black reads as dirt on pale */
+  --scrim: oklch(.30 .03 30 / .45);
+  /* Re-derived, not rotated — see (3) above. h1 is the accent, as it is in dark mode. */
+  --h2: oklch(.50 .088 218);        /* teal */
+  --h3: oklch(.50 .214 338);        /* magenta */
+  --h4: oklch(.50 .114 158);        /* green */
+  --h5: oklch(.50 .278 278);        /* blue */
+  --h6: oklch(.50 .198 24);         /* red — moved off the dark set's hue 38 */
+}
+
+/* The top bar in light mode: a crimson island, so it keeps the DARK ink.
+ *
+ * Same trick as the palette itself — these are all properties the bar's existing rules
+ * already read, so redefining them here re-inks the whole header through inheritance
+ * without touching a single rule. The values are the dark theme's, and they were verified
+ * against this exact crimson: --fg 9.37:1, --dim 6.22:1, --accent 8.76:1, and the lifted
+ * blue at 4.21:1 for a focus ring that WCAG asks 3:1 of.
+ *
+ * The accent is the bright #facc00 here rather than the page's deep amber, and that is
+ * not an inconsistency: it is the same claim — "this is live" — spelled in the value that
+ * survives the surface it sits on. Yellow needs to be dark to read on white and bright to
+ * read on crimson. */
+:root[data-theme="pokemon"] .bar {
+  --panel: oklch(.21 .025 25);
+  --panel-2: oklch(.26 .03 25);     /* the inputs in the header */
+  --line: oklch(.44 .09 27);
+  --line-2: oklch(.58 .12 28);
+  --hi: oklch(.97 .02 95);
+  --fg: oklch(.88 .02 90);
+  --dim: oklch(.76 .04 65);
+  /* Lifted from the dark theme's .60 to .70. --dim-2 paints input placeholders, and the
+   * placeholders in this header are documentation rather than decoration (see the note by
+   * `input::placeholder`) — on crimson, .60 is 3.35:1 and that is not text you can read.
+   * At .70 it clears 4.95:1 and still sits below --dim's 6.22:1, so the ramp holds. */
+  --dim-2: oklch(.70 .05 45);
+  --accent: oklch(.86 .176 92);     /* #facc00 */
+  /* #5b8bff — the lifted blue, for focus rings on a dark surface. It has no part in the
+   * wordmark any more: that used to be text wearing a blue text-shadow, and it's now the drawn
+   * logo, which brings its own outline. See `.bar h1 .wordmark`. */
+  --accent-2: oklch(.66 .18 265);
+  --on-accent: oklch(.18 .03 25);
+  --shadow: oklch(.12 .03 25 / .6);
+}
+
+
+/* Square everything. One rule rather than hunting radii through the file — a
+ * terminal has no rounded corners, and any that creep back in will be caught here. */
+input, button, select, .picker, .picker-badge, .pane-docker, .pane-skew, .pane-capped, .scrub-fill,
+.scrub-bubble, .scrub-track::before, mark, .dot, .chip-dot {
+  border-radius: 0;
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` has to mean hidden. The UA rule behind it is `[hidden] { display: none }`
+ * at the lowest specificity, so any class here that sets `display` silently outranks
+ * it — and several do (`.scrub`, `.custom-range`, `.pane-loading`). Those are all
+ * toggled from JS by setting `.hidden`, which would then do nothing at all while the
+ * code went on believing the element was gone. One rule, stated once, rather than a
+ * `[hidden]` companion beside every such class. */
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--ui)/1.5 var(--mono);
+}
+
+/* ── top bar ─────────────────────────────────────────────────────────────── */
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  /* The instrument's own surface, not a card — see --chrome up top. */
+  background: var(--chrome);
+  border-bottom: 1px solid var(--chrome-line);
+}
+
+/* The app's name. These styles now dress the FALLBACK — the alt text, if the wordmark file is
+ * missing — while `.wordmark` below is what you normally see. Kept rather than deleted for
+ * exactly that reason: a broken image should still read as the app's name in the app's accent,
+ * not as unstyled black serif. */
+.bar h1 {
+  margin: 0;
+  font-size: var(--ui);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+/* The wordmark itself — the drawn logo, in both themes.
+ *
+ * This replaces a CSS impression of the same thing: the word was set in the UI font with four
+ * 1px text-shadows faking the logo's yellow-fill/blue-outline trick, and last change that
+ * outline was darkened to the true logo blue to make it read. All of that was an approximation
+ * of a piece of artwork, and the artwork is now here, carrying its own outline and glow — so
+ * the impression is gone rather than layered underneath it.
+ *
+ * Sized by HEIGHT with `width: auto`, never both: the file is the only thing that knows the
+ * word's proportions, and pinning a width would squash it the first time the art is redrawn.
+ * 36px against the bar's 15px text — a wordmark is allowed to be much the biggest thing in the
+ * row, and it's the thing that sets the bar's height now, since the controls beside it are
+ * shorter than this. The bar's own padding is what stops it touching the edges.
+ *
+ * The file is exported at 3x this (108px tall), so it stays sharp on a high-DPI screen. If this
+ * height changes again, re-export from `logedex.png` to match — a bitmap scaled up in the
+ * browser is the one way this can go soft.
+ *
+ * `display: block` because an inline image sits on the text baseline and leaves a few px of
+ * descender gap under it, which would make the bar taller than it looks like it should be. */
+.bar h1 .wordmark {
+  display: block;
+  height: 36px;
+  width: auto;
+}
+
+.add-host {
+  display: flex;
+  gap: 6px;
+}
+
+input, button, select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+}
+
+/* Readable, not decorative: a placeholder here documents the query syntax. */
+input::placeholder { color: var(--dim-2); }
+
+/* Focus is a reversed block, the way a terminal shows a cursor — brighter and
+ * cheaper to spot than a halo, and it needs no shadow to read on this ground. */
+/* Keyboard focus. --accent-2 rather than --accent, and that's a small correction as much
+ * as a themed one: focus is where your keyboard is, which is not the same claim as "this
+ * is live". In yeet mode the two are the same colour and nothing changes; in pokédex mode
+ * the ring goes blue and stops looking like a status. */
+input:focus-visible, button:focus-visible, select:focus-visible {
+  outline: 1px solid var(--accent-2);
+  outline-offset: 0;
+  border-color: var(--accent-2);
+}
+input:focus { border-color: var(--line-2); outline: none; }
+
+#host-url { width: 22em; }
+#host-label { width: 10em; }
+
+/* Buttons read as bracketed commands. Uppercase and letter-spaced so they're
+ * distinguishable from log content at a glance, which matters when the whole page
+ * is one typeface. */
+button {
+  cursor: pointer;
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+}
+/* Hover brightens; it does not colour. The accent marks what IS — selected, live, a
+ * hit — never what the pointer happens to be over, or the whole bar lights up as you
+ * cross it. */
+button:hover { border-color: var(--line-2); color: var(--hi); }
+button:active { background: var(--line); }
+
+/* A pressed/selected control is reverse video: the single strongest "on" signal a
+ * monochrome interface has, and the one place the accent is allowed to fill an area
+ * rather than mark a line. */
+.range button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.hint { color: var(--dim); }
+/* Bad news is the brightest grey, not a hue — see the note on the ramp up top. */
+.hint[data-kind="bad"] { color: var(--hi); }
+
+/* ── the login gate ────────────────────────────────────────────────────────── */
+/* Structure, proportions and flow lifted from httpwatch's gate — a centred card, a
+ * mark, a full-width primary button, the URL in a dashed box, a spinner while you
+ * finish in the other tab. The idiom is this app's, though: square corners and one
+ * accent, so it reads as the same program you were about to use rather than a sign-in
+ * page bolted onto the front of it. */
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  /* A wash behind the card, so the screen has a centre of gravity instead of being a flat
+   * black field with a box floating on it. --accent-2, because a sign-in screen is the one
+   * view with no containers on it — there is no status for the accent to be confused with,
+   * and in pokédex mode the blue wash under a red bar is the device's own colouring. */
+  background:
+    radial-gradient(760px 420px at 50% -8%, color-mix(in oklab, var(--accent-2) 10%, transparent), transparent 65%),
+    var(--bg);
+}
+
+.gate-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 32px 28px;
+  /* The thing that was actually wrong: the card was centred but its contents weren't. */
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  box-shadow: 6px 6px 0 var(--shadow);      /* hard offset, matching the picker */
+}
+
+/* A drawn mark rather than an emoji: everything else here is one accent on grey, and
+ * a colour emoji would be the loudest object on the screen by a distance. */
+.gate-mark {
+  display: block;
+  font-size: 30px;
+  line-height: 1;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+
+.gate-card h1 {
+  margin: 14px 0 6px;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fg);
+}
+
+.gate-sub {
+  margin: 0 0 22px;
+  color: var(--dim);
+  line-height: 1.5;
+}
+.gate-sub b { color: var(--accent); font-weight: 600; }
+
+/* Reverse video, the same "on" signal the range presets use — the one place the
+ * accent is allowed to fill an area rather than mark a line. */
+.gate-btn {
+  width: 100%;
+  padding: 10px 22px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.gate-btn:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--on-accent); filter: brightness(1.08); }
+.gate-btn:disabled { opacity: 0.45; cursor: default; filter: none; }
+
+.gate-link { margin-top: 20px; }
+.gate-link p { margin: 0 0 8px; color: var(--dim); font-size: var(--ui-md); }
+/* Dashed, because it's a fallback you shouldn't normally need — and `break-all`
+ * because a device URL has nowhere natural to wrap and would otherwise widen the
+ * card past the viewport. */
+.gate-link a {
+  display: block;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px dashed color-mix(in oklab, var(--accent) 45%, transparent);
+  color: var(--accent);
+  font-size: var(--ui-md);
+  text-decoration: none;
+  word-break: break-all;
+}
+.gate-link a:hover { border-style: solid; }
+
+.gate-wait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--dim-2);
+  font-size: var(--ui-md);
+}
+
+/* A square that turns, not a circle: this file has a rule against rounded corners and
+ * a spinner is no reason to break it. One accent edge is what makes the rotation
+ * legible at 12px. */
+.spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Honour a reader who asked the OS for less motion: the text says the same thing. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; border-top-color: var(--accent); }
+}
+
+.gate-error {
+  margin: 16px 0 0;
+  color: var(--hi);
+  font-size: var(--ui-md);
+}
+
+/* ── the global time range ─────────────────────────────────────────────────── */
+.range {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;          /* right-align: it governs the panes, not the hosts */
+}
+
+.range button {
+  padding: 4px 8px;
+  background: none;
+  border-color: transparent;
+}
+.range button:hover { border-color: var(--line); }
+/* `.on` styling lives with the other button states, up top. */
+
+.range-note {
+  margin-left: 6px;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  white-space: nowrap;
+}
+
+/* ── search ────────────────────────────────────────────────────────────────── */
+.find {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-basis: 100%;           /* its own row under the range, so neither cramps */
+}
+
+/* The two boxes share the row. The include box is wider because a search term is
+ * usually longer and more varied than the thing you're sick of seeing, which tends to
+ * be one word or one path. */
+#find-input { width: 26em; }
+#find-exclude { width: 18em; }
+#find-input, #find-exclude { max-width: 100%; }
+
+/* The clear affordance is a single character, not a labelled button — it appears
+ * beside a box that already explains itself, and a word there would be one more
+ * thing to read every time you look at the bar. */
+#find-clear {
+  padding: 0 6px;
+  color: var(--dim-2);
+  background: none;
+  border: none;
+}
+#find-clear:hover { color: var(--hi); }
+
+
+/* A line hidden by the browser-side filter. `display: none` rather than removal —
+ * clearing the search brings it straight back, and it still counts toward the
+ * pane's buffer so the numbers mean the same thing with a search on or off. */
+.line.filtered { display: none; }
+
+/* A search hit inside a line — the one thing on screen the accent is FOR, and the
+ * reason it's worth reserving: with nothing else coloured, a hit is findable in a
+ * wall of grey text without reading any of it.
+ *
+ * The text goes dark against the fill rather than inheriting: the body text is
+ * near-white, and white-on-yellow is the one combination that ends up less legible
+ * highlighted than plain. */
+mark {
+  background: var(--accent);
+  color: var(--on-accent);
+  padding: 0 1px;
+}
+
+/* ── the time scrubber ─────────────────────────────────────────────────────── */
+.scrub {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-basis: 100%;
+  padding-top: 2px;
+}
+
+.scrub-edge {
+  flex: none;
+  width: 12ch;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.scrub-track {
+  position: relative;
+  flex: 1;
+  height: 20px;
+  margin-bottom: 12px;        /* room for the tick labels below the rail */
+}
+
+/* The time under the handle you're holding. Anchored to the handle and centred on
+ * it, so the number you're setting is where you're already looking — reading it off
+ * a label at the end of the track means looking away mid-drag. */
+.scrub-bubble {
+  position: absolute;
+  bottom: 100%;
+  transform: translateX(-50%);
+  margin-bottom: 3px;
+  padding: 2px 6px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: var(--ui-sm);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* Gradations under the rail. Absolute so each label sits at its own position; the
+ * ends pull themselves inward so neither runs off the track. */
+.scrub-ticks {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 12px;
+  pointer-events: none;
+}
+
+.scrub-tick {
+  position: absolute;
+  transform: translateX(-50%);
+  color: var(--dim);
+  font-size: var(--ui-xs);
+  white-space: nowrap;
+}
+.scrub-tick:first-child { transform: none; }
+.scrub-tick:last-child { transform: translateX(-100%); }
+
+/* Marks on the rail itself, so the labels below have something to point at. */
+.scrub-tick::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -5px;
+  width: 1px;
+  height: 4px;
+  background: var(--line-2);
+}
+.scrub-tick:first-child::before { left: 0; }
+.scrub-tick:last-child::before { left: 100%; }
+
+/* The window in words, under the whole control: where it starts and ends, how long
+ * ago that is, and how wide it is. Three readings of the same window, because each
+ * answers a question the others don't. */
+.scrub-readout {
+  flex-basis: 100%;
+  padding: 2px 0 0 14px;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* The rail, drawn on the track rather than by either input — two native rails
+ * stacked on each other would double the ink and never quite line up. */
+.scrub-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 3px;
+  transform: translateY(-50%);
+  background: var(--line-2);
+}
+
+/* The selected window — also the handle for moving it. Grabbing the band slides the
+ * whole window while keeping its width, which is the gesture for "same duration, a
+ * bit earlier"; the thumbs at either end resize it. */
+.scrub-fill {
+  position: absolute;
+  top: 50%;
+  height: 3px;
+  transform: translateY(-50%);
+  background: var(--accent);
+  cursor: grab;
+  touch-action: none;         /* a horizontal drag here is not a page scroll */
+}
+.scrub-fill:hover { box-shadow: 0 0 0 1px var(--accent); }
+.scrub-fill.dragging { cursor: grabbing; box-shadow: 0 0 0 1px var(--accent); }
+.scrub-fill:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
+
+/* A 3px rail is not a target. The band takes the pointer across the full height of
+ * the track, while the thumbs — later in the DOM, so painted over this — keep the
+ * few pixels at each end for resizing. */
+.scrub-fill::after {
+  content: "";
+  position: absolute;
+  inset: -9px 0;
+}
+
+/* Two range inputs share one track: each is stripped of its own rail and made
+ * click-through, so only the thumbs take the pointer. Without `pointer-events: none`
+ * on the input, whichever is painted on top would swallow every click and one handle
+ * would be unreachable. */
+.scrub-track input[type="range"] {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: none;
+}
+
+.scrub-track input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 9px;
+  height: 18px;
+  border: 1px solid var(--bg);
+  border-radius: 0;
+  background: var(--accent);
+  cursor: ew-resize;
+  pointer-events: auto;      /* the one part that IS interactive */
+}
+
+.scrub-track input[type="range"]::-moz-range-thumb {
+  width: 9px;
+  height: 18px;
+  border: 1px solid var(--bg);
+  border-radius: 0;
+  background: var(--accent);
+  cursor: ew-resize;
+  pointer-events: auto;
+}
+
+.scrub-track input[type="range"]::-moz-range-track { background: none; border: none; }
+
+.scrub-track input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 2px solid var(--fg); }
+.scrub-track input[type="range"]:focus-visible::-moz-range-thumb { outline: 2px solid var(--fg); }
+
+.custom-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+.custom-range label { color: var(--dim); }
+.custom-range input { margin-left: 4px; }
+.custom-range em { color: var(--fg); font-style: normal; }
+
+/* ── layout ──────────────────────────────────────────────────────────────── */
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;              /* let the children own the scrolling, not body */
+}
+
+.empty {
+  color: var(--dim);
+  margin: 14px;
+  max-width: 42ch;
+}
+
+.empty.small { margin: 6px 10px; }
+
+/* ── host sidebar ────────────────────────────────────────────────────────── */
+/* The sidebar is a column: a fixed filter box at the top, and the host list taking
+ * the rest and scrolling on its own. The box must not scroll away — it's how you get
+ * back to the top of a long list without scrolling to the top of a long list. */
+.hosts {
+  width: 320px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--chrome-line);
+  background: var(--sidebar);
+}
+
+/* The bar the sidebar keeps when everything else is folded away. */
+.hosts-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+}
+
+.hosts-toggle {
+  flex: none;
+  padding: 2px 5px;
+  color: var(--dim);
+  background: none;
+  border: none;
+  line-height: 1.2;
+}
+.hosts-toggle:hover { color: var(--hi); }
+
+.host-filter {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Collapsed: the panel shrinks to its toggle and everything inside it goes.
+ *
+ * A rail rather than nothing at all. Hiding the sidebar outright means the control
+ * that brings it back has to live somewhere else — the top bar, a shortcut you have
+ * to know — and then finding it is a small puzzle every time. Eighteen pixels of
+ * border is a cheap price for the way back being where the way out was. */
+.hosts.collapsed { width: auto; }
+.hosts.collapsed .host-filter,
+.hosts.collapsed .host-list { display: none; }
+
+.host-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.host { border-bottom: 1px solid var(--line); }
+
+.host-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+}
+
+/* The whole name is the hit target for collapsing, not a separate chevron button —
+ * a 10px caret is a mean thing to ask someone to hit repeatedly. */
+.host-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: none;
+  text-transform: none;
+}
+.host-toggle:hover { color: inherit; }
+.host-toggle:hover .host-name { color: var(--hi); }
+
+.host-caret {
+  flex: none;
+  width: 1ch;
+  color: var(--dim-2);
+}
+
+.host-name {
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: 0.03em;
+}
+
+/* How many containers are behind a collapsed host — the number is the reason the
+ * collapsed row is still worth reading. */
+.host-count {
+  color: var(--dim-2);
+  font-size: var(--ui-sm);
+}
+
+/* A collapsed host is one line, so its header shouldn't read as the lid of an open
+ * box: no bottom rule, and the row tightens up. */
+.host.collapsed .host-head { padding: 6px 10px; }
+
+/* The row the arrow keys are on. A left rule rather than a fill, matching how an
+ * attached container is marked, so the two can be true at once and still be read. */
+.container.cursor { background: var(--panel-2); }
+.container.cursor .attach { border-left-color: var(--dim); }
+
+.host-url {
+  flex: 1;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-error {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--hi);
+  font-size: var(--ui-md);
+  word-break: break-word;
+}
+
+.rm {
+  padding: 0 5px;
+  line-height: 1.2;
+  color: var(--dim);
+  background: none;
+  border: none;
+}
+.rm:hover { color: var(--hi); }
+
+.containers {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.attach {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 10px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 0;
+  border-left: 2px solid transparent;
+}
+
+.attach:hover { background: var(--panel-2); }
+/* Attached: an accent rule down the left edge. The name goes bright rather than
+ * accent too — one mark per state, or "selected" is being said twice in the space of
+ * three characters. */
+.container.attached .attach { border-left-color: var(--accent); background: var(--panel-2); }
+.container.attached .cname { color: var(--hi); }
+
+/* Square status marks, not dots — a block is what a terminal draws. */
+.dot {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  border: 1px solid var(--dim);
+  background: var(--dim);
+}
+/* State by FILL, not by hue: running is solid accent, in-between states are a solid
+ * grey, and a stopped container is a hollow ring. Shape carries what colour used to,
+ * so the three are still one glance apart in a list of forty. */
+.state-running .dot { background: var(--accent); border-color: var(--accent); }
+.state-paused .dot, .state-restarting .dot { background: var(--dim); border-color: var(--dim); }
+.state-exited .dot, .state-dead .dot { background: none; border-color: var(--dim); }
+
+.cname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cimage {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.container { display: flex; align-items: center; }
+.container .attach { flex: 1; min-width: 0; }
+
+/* ── merge picker ──────────────────────────────────────────────────────────── */
+/* max-height is set in JS from the space actually available, so a picker anchored
+ * low in a long host list caps itself and scrolls instead of running off-screen. */
+.picker {
+  position: fixed;
+  z-index: 20;
+  width: 370px;
+  max-width: calc(100vw - 16px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  box-shadow: 4px 4px 0 var(--shadow);   /* a hard offset shadow, not a blur */
+}
+
+.picker-head {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+}
+
+/* `min-height: 0` is what lets the list actually shrink inside the capped flex
+ * column — without it a flex item refuses to go below its content height and the
+ * footer gets pushed out of the box instead of the list scrolling. */
+.picker-list { overflow-y: auto; min-height: 0; padding: 4px 0; }
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+}
+/* Only the tick-list rows are clickable — in the confirm view a row is a statement
+ * of what will happen, and a hover highlight would invite a click that does nothing. */
+label.picker-row { cursor: pointer; }
+label.picker-row:hover { background: var(--panel-2); }
+/* The suggested row, washed rather than filled: it has to read as chosen without
+ * shouting over the rows underneath it, which are the alternatives. */
+.picker-row.match { background: color-mix(in oklab, var(--accent) 9%, transparent); }
+
+/* The confirm view's escape hatch: the suggestion stands on its own above, and this
+ * is the quieter "unless you meant something else" underneath it. */
+.picker-change {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+}
+.picker-change-label { color: var(--dim); font-size: var(--ui-sm); }
+.picker-alt {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--ui-sm);
+  padding: 3px 4px;
+}
+
+.picker-host { color: var(--dim); }
+.picker-container { font-weight: 600; }
+.picker-image {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker-badge {
+  flex: none;
+  padding: 0 4px;
+  color: var(--accent);
+  border: 1px solid currentColor;
+  font-size: var(--ui-xs);
+}
+/* A weaker reason for being near the top — ranked up, but not assumed. */
+.picker-badge.weak { color: var(--dim); border-color: var(--line); }
+
+.picker-foot {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+}
+.picker-foot button:first-child { border-color: var(--accent); color: var(--accent); }
+
+/* ── the alert picker ────────────────────────────────────────────────────────
+ * Same shell as the merge picker — it's the same gesture (a button in a pane header opens a menu
+ * about that pane), so it gets the same box, placement and dismissal rather than a second idiom.
+ * These are the parts a form needs that a list didn't. */
+.picker-note {
+  padding: 6px 10px;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+}
+/* Bad news is the brightest grey, not a hue — the same rule as `.hint[data-kind="bad"]`. */
+.picker-note.bad { color: var(--hi); }
+
+/* The Slack gate. Bordered and full width because it REPLACES the form rather than sitting beside
+ * it: there is nothing to fill in until a workspace is connected, and a disabled form with a note
+ * over it would just invite people to try. */
+.picker-gate {
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--fg);
+  font-size: var(--ui-sm);
+  line-height: 1.5;
+}
+.picker-gate p { margin: 0 0 6px; }
+.picker-gate a {
+  display: block;
+  margin-bottom: 8px;
+  padding: 4px 6px;
+  color: var(--accent);
+  /* Dashed, like the gate card's login URL: a link you're expected to open in another tab and
+   * come back from, rather than navigate away with. */
+  border: 1px dashed color-mix(in oklab, var(--accent) 45%, transparent);
+  word-break: break-all;
+}
+.picker-gate a:hover { border-style: solid; }
+.picker-gate .picker-foot { padding: 0; border-top: none; }
+
+.alert-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 0;
+  border-top: 1px solid var(--line);
+}
+.alert-form label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--ui-sm);
+  color: var(--dim);
+}
+/* A fixed label column, so the four inputs line up into one edge instead of stepping in and out
+ * with the length of each word. */
+.alert-form label > span { flex: 0 0 9ch; }
+.alert-form input { flex: 1; min-width: 0; }
+.alert-form .alert-check { color: var(--dim); }
+.alert-form .alert-check input { flex: 0 0 auto; }
+.alert-form .picker-foot { padding: 8px 0; }
+.alert-form .picker-note { padding: 0; }
+
+/* An existing rule's pattern, as code — it is code, and at a glance the difference between
+ * `ERROR|FATAL` and `ERROR\|FATAL` is the difference between a working rule and a silent one. */
+.alert-pattern {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: var(--ui-sm);
+}
+/* Rules wrap rather than truncate: a rule across four hosts has a lot to say about itself, and
+ * this row is the only place it says it. */
+.alert-row { flex-wrap: wrap; }
+
+/* The bell. Borderless and quiet at rest, exactly like the merge `+` beside it — see the note
+ * there for why the two header glyphs stay unboxed. */
+.alert-btn {
+  flex: none;
+  display: inline-flex;
+  padding: 0 4px;
+  color: var(--dim);
+  background: none;
+  border: none;
+}
+.alert-btn:hover { color: var(--hi); }
+.alert-btn svg { display: block; }
+
+/* ── log panes ───────────────────────────────────────────────────────────── */
+.panes {
+  flex: 1;
+  display: flex;
+  gap: 1px;
+  min-width: 0;
+  overflow-x: auto;
+  background: var(--line);
+}
+
+/* `flex-grow` is the width, and it's what dragging a grip changes — see `.pane-grip`.
+ * With `flex-basis: 0` the grow factors ARE the proportions, so a pane at 2 is twice
+ * one at 1, and a pane added or closed rebalances the row on its own instead of
+ * leaving a hole where pinned pixel widths used to be. */
+.pane {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 320px;           /* narrow, but never unreadable — then scroll */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+}
+
+/* The drag target between two panes.
+ *
+ * It straddles the 1px gap rather than living in it: a 1px hit area is unusable, so
+ * this is 8px wide and sits above both neighbours. The panes themselves stay flush —
+ * the affordance is in the cursor and in what lights up on hover, not in a visible bar
+ * taking up room.
+ *
+ * Deliberately lopsided: 2px inside this pane and 6px into the next. The pane body's
+ * scrollbar lives at its right edge, and a grip centred on the seam would sit on top
+ * of the last few pixels of it — you'd reach for the scrollbar and start resizing. The
+ * next pane's left edge has nothing there but the timestamp column, so that's the
+ * cheaper side to intrude on.
+ *
+ * On the last pane there is no seam to drag, so it isn't rendered at all. */
+.pane-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -6px;
+  width: 8px;
+  z-index: 4;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: col-resize;
+  touch-action: none;         /* a horizontal drag here is not a page scroll */
+}
+.pane:last-child .pane-grip { display: none; }
+
+/* Lights the seam, not the whole strip: the feedback should look like the boundary
+ * you're about to move, which is 1px wide. */
+.pane-grip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;                  /* over the 1px gap itself, given the offset above */
+  width: 1px;
+  background: transparent;
+}
+.pane-grip:hover::after,
+.pane-grip:focus-visible::after,
+.pane-grip.dragging::after { background: var(--accent); }
+.pane-grip:focus-visible { outline: none; }
+
+/* CENTRED, not baseline-aligned, and the icon is why.
+ *
+ * This was `baseline`, which is the better answer for a row that is only text: the pane's
+ * name at 13px and the chips at 11px then sit on one line rather than each being centred in
+ * its own box. But the row also holds the creature icon, which at 44px is three times the
+ * height of the tallest text in it and therefore sets the row's height — and a baseline group
+ * doesn't centre itself in a taller line, it sits at the top of it. So the name and the `×`
+ * rode high while the merge button, which has to opt out of baseline alignment because an
+ * svg has no baseline to align, sat in the middle. The two controls at the end of the row
+ * were visibly on different lines.
+ *
+ * Centring everything is what makes the row agree with itself: one rule, no per-item opt-outs
+ * (the `align-self: center` those items used to carry is gone), and it stays right whatever
+ * the icon's size is next changed to. What it costs is the shared text baseline, which is a
+ * fair trade at a 44px icon — nothing in here is a run of prose. */
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.pane-container { font-weight: 600; letter-spacing: 0.03em; }
+
+/* The interleave affordance. Quiet until hovered — it sits in every pane's header,
+ * so at rest it has to read as available rather than as something to be dealt with,
+ * and it must not compete with the status text beside it. */
+/* No margin trickery to push it right — `.pane-state` above already takes the slack
+ * with `flex: 1`, so this and the close button sit at the end of the row.
+ *
+ * No `align-self` either: the header centres its items now, so this lines up with the close
+ * button beside it without asking. It used to need one, and that opt-out was exactly what
+ * left the two controls on different lines — see the note on `.pane-head`. */
+.add-stream {
+  flex: none;
+  display: inline-flex;
+  padding: 0 4px;
+  color: var(--dim);
+  background: none;
+  border: none;
+}
+.add-stream:hover { color: var(--hi); }
+/* The glyph inherits the button's colour through `stroke: currentColor`, so hover and
+ * focus need no rule of their own. */
+.add-stream svg { display: block; }
+.pane-host { color: var(--dim); font-size: var(--ui-sm); }
+
+/* The container's own state, from the host's container list. */
+.pane-docker {
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  font-size: var(--ui-sm);
+}
+.pane-docker[data-state="running"] { color: var(--accent); }
+.pane-docker[data-state="exited"], .pane-docker[data-state="dead"],
+.pane-docker[data-state="gone"], .pane-docker[data-state="unreachable"] { color: var(--hi); }
+.pane-docker[data-state="paused"], .pane-docker[data-state="restarting"] { color: var(--fg); }
+
+/* What OUR stream of it is doing — a different question. */
+.pane-state {
+  flex: 1;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-state[data-state="streaming"] { color: var(--accent); }
+.pane-state[data-state="ended"] { color: var(--fg); }
+.pane-state[data-state="error"] { color: var(--hi); }
+/* A closed window that delivered everything it had: finished, not broken. */
+.pane-state[data-state="complete"] { color: var(--fg); }
+.pane-state[data-state="loading"] { color: var(--dim); }
+
+/* The body and its loading skeleton stack in one box: the skeleton lies over the
+ * body rather than inside it, so it is never part of the line list. */
+.pane-view {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.pane-body {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+/* ── the loading skeleton ──────────────────────────────────────────────────── */
+/* Placeholder rows in the shape of log lines, held over the body while a window is
+ * being fetched. Opaque, because it covers the moment between the old window's lines
+ * being dropped and the new ones arriving, and half-seeing the old set through it
+ * would be worse than seeing neither. */
+.pane-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 6px 0;
+  background: var(--bg);
+  overflow: hidden;
+  pointer-events: none;
+  transition: opacity 180ms ease-out;
+  /* The LOG's size, not the interface's — this block is a stand-in for log lines. Its columns
+   * below are measured in `ch`, which resolves against whatever font-size is in force, so on
+   * the interface scale the skeleton's gutters would be wider than the real ones it dissolves
+   * into and the bars would visibly jump sideways as the text arrived. `.skel-label` sets its
+   * own size and is unaffected — it's a caption, not a stand-in for anything. */
+  font-size: var(--log);
+}
+.pane-loading.out { opacity: 0; }
+
+.skel-line {
+  display: flex;
+  align-items: center;
+  /* Exactly one `.line`, derived rather than copied: this was the literal 19.5px that 13px at
+   * 1.5 works out to, which was correct and silently would not have stayed correct. */
+  height: calc(var(--log) * 1.5);
+  padding: 0 10px;
+}
+
+/* Same column geometry as a real line, so the skeleton resolves into the log rather
+ * than being replaced by it — the bars are already where the text will be. */
+.skel-bar {
+  height: 7px;
+  background: var(--line);
+}
+.skel-ts { flex: 0 0 11ch; margin-right: 10px; }
+.skel-who { flex: 0 0 calc(var(--who-w, 12ch) - 2ch); margin-right: 10px; }
+.skel-msg { min-width: 0; }
+
+/* One sweep across the whole block rather than a shimmer per bar: twelve independent
+ * animations pulsing at once is noise, and a single pass left-to-right also says
+ * which way the data is coming. */
+.skel-rows {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  justify-content: flex-start;
+  -webkit-mask-image: linear-gradient(100deg, #000 30%, #000a 45%, #fff 55%, #000a 65%, #000 80%);
+  mask-image: linear-gradient(100deg, #000 30%, #000a 45%, #fff 55%, #000a 65%, #000 80%);
+  -webkit-mask-size: 300% 100%;
+  mask-size: 300% 100%;
+  animation: skel-sweep 1.4s linear infinite;
+}
+
+@keyframes skel-sweep {
+  from { -webkit-mask-position: 120% 0; mask-position: 120% 0; }
+  to   { -webkit-mask-position: -20% 0; mask-position: -20% 0; }
+}
+
+.skel-label {
+  flex: none;
+  padding: 4px 10px 0;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+}
+
+/* A sweeping mask is decoration; the words below it carry the same information. For
+ * anyone who has asked for less motion, keep the words and drop the sweep. */
+@media (prefers-reduced-motion: reduce) {
+  .skel-rows { animation: none; -webkit-mask-image: none; mask-image: none; opacity: 0.6; }
+  .pane-loading { transition: none; }
+}
+
+/* A log line is a row of columns: time │ host │ message.
+ *
+ * Fixed widths on the first two, so the message column starts at the same x on
+ * every row — that alignment is what lets you scan a log rather than read it. It
+ * also means a long message wraps inside its own column and its continuation lines
+ * stay under the message, not under the timestamp.
+ *
+ * Flex rows rather than a grid over the whole body: `display: contents` on the rows
+ * would align columns too, but it would cost the row its own box — and this row
+ * needs one, for the hover highlight, the per-host colour stripe, and being hidden
+ * by the search filter. */
+/* Wrapping belongs to the message alone, so it's set there rather than on the row.
+ * Inherited `pre-wrap` here is what let a 12-character stamp wrap inside a 12ch box
+ * on sub-pixel rounding — the columns are fixed-size cells and must never reflow. */
+/* The log's own size, pinned here and nowhere else. Everything in a line — the timestamp, the
+ * host label, the message, a search highlight — inherits from this, so this one declaration is
+ * what keeps the interface and the logs on separate scales. Deliberately NOT inherited from
+ * `body`: the chrome is set from `--ui` and will get nudged again, and each time it would drag
+ * the lines with it. See the note by the scale. */
+.line {
+  display: flex;
+  padding: 0 10px;
+  font-size: var(--log);
+}
+.line:hover { background: var(--panel); }
+/* stderr is the brightest text on screen — louder than stdout without being a
+ * different colour, which is the whole ramp in one line. */
+.line.err .msg { color: var(--hi); }
+
+/* `HH:MM:SS.mmm` — a fixed 13ch cell for 12 characters, the extra column being
+ * slack so rounding can never push the last digit onto a second line. `tabular-nums`
+ * is insurance for a fallback font that isn't monospace: the digits stay in step
+ * even then, which is the whole reason this column is worth aligning. */
+.ts {
+  flex: 0 0 13ch;
+  padding-right: 8px;
+  border-right: 1px solid var(--line);
+  color: var(--dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+/* The message is the only column that wraps, and it wraps inside its own box — so
+ * continuation lines stay under the message, not under the timestamp. */
+.msg {
+  padding-left: 8px;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── ANSI colour from the container ────────────────────────────────────────── */
+/* Plenty of things colour their output whether or not anyone is watching — pip, npm,
+ * cargo, pytest, chalk — and docker passes those bytes straight through. The escapes
+ * are parsed in ansi.js; these are what the runs it produces resolve to.
+ *
+ * This is the one place hue is not rationed, and it isn't an exception to the rule
+ * up top: that rule is about the INTERFACE, and these bytes are the content the
+ * interface exists to show. A service that marked its errors red is telling you
+ * something; repainting it grey to match the furniture would be discarding data to
+ * protect a look.
+ *
+ * What is imposed is lightness. A raw ANSI palette is built for a white-on-black
+ * terminal and lands anywhere from unreadable (blue on near-black) to searing; these
+ * sit at one lightness per tier, each at its own hue's sRGB chroma ceiling — the same
+ * treatment as the stream colours, for the same reason. Every one clears 8:1 against
+ * the background, and no line can be brighter than the --hi that means "look here". */
+.a-red     { color: oklch(.75 .143 25); }
+.a-green   { color: oklch(.75 .224 145); }
+.a-yellow  { color: oklch(.75 .146 95); }
+.a-blue    { color: oklch(.75 .121 265); }
+.a-magenta { color: oklch(.75 .235 330); }
+.a-cyan    { color: oklch(.75 .123 210); }
+.a-black   { color: var(--dim-2); }
+.a-white   { color: var(--fg); }
+
+.a-bred     { color: oklch(.87 .066 25); }
+.a-bgreen   { color: oklch(.87 .257 145); }
+.a-byellow  { color: oklch(.87 .17 95); }
+.a-bblue    { color: oklch(.87 .06 265); }
+.a-bmagenta { color: oklch(.87 .108 330); }
+.a-bcyan    { color: oklch(.87 .112 210); }
+.a-bblack   { color: var(--dim); }
+.a-bwhite   { color: var(--hi); }
+
+/* Backgrounds are the same hues taken right down. A log that paints a background is
+ * usually flagging one word, and at full strength that word becomes a slab that wins
+ * every staring contest on the pane. */
+.a-bg-red     { background: oklch(.30 .07 25); }
+.a-bg-green   { background: oklch(.30 .08 145); }
+.a-bg-yellow  { background: oklch(.30 .06 95); }
+.a-bg-blue    { background: oklch(.30 .07 265); }
+.a-bg-magenta { background: oklch(.30 .08 330); }
+.a-bg-cyan    { background: oklch(.30 .06 210); }
+.a-bg-black   { background: #000; }
+.a-bg-white   { background: var(--line-2); }
+.a-bg-bred, .a-bg-bgreen, .a-bg-byellow, .a-bg-bblue,
+.a-bg-bmagenta, .a-bg-bcyan, .a-bg-bblack, .a-bg-bwhite { background: var(--line-2); }
+
+/* The same palette, re-derived for a light field — pokédex mode.
+ *
+ * Not a tweak: the set above is built for a dark terminal and every one of its twelve
+ * colours lands between 1.24:1 and 2.26:1 on a near-white page. That is the entire log,
+ * from every container that prints in colour, rendered unreadable. So the field can only
+ * be inverted if this exists.
+ *
+ * Same construction as above — one lightness per tier, each hue at its own sRGB chroma
+ * ceiling — mirrored: L=.52 for the normal tier and L=.40 for the bright one. BRIGHT IS
+ * DARKER HERE, and that is the point rather than an oversight: on a dark field bright
+ * means lighter, so on a light field it has to mean darker, or a service's `bright red`
+ * stops standing out from its `red`. Every colour clears 4.5:1 (4.79–9.70:1 measured).
+ *
+ * The backgrounds become PALE TINTS instead of dark blocks, for the one reason that
+ * matters: the text sitting on them is this theme's dark ink, so a dark chip would hide
+ * it. --fg lands 8.0–8.4:1 on all six. `on black` and `on white` stop being literal —
+ * black becomes the darkest tint the ink still survives on, white the lightest — which is
+ * what every light-theme terminal does, and for the same reason. */
+:root[data-theme="pokemon"] .a-red     { color: oklch(.52 .206 25); }
+:root[data-theme="pokemon"] .a-green   { color: oklch(.52 .160 145); }
+:root[data-theme="pokemon"] .a-yellow  { color: oklch(.52 .105 95); }
+:root[data-theme="pokemon"] .a-blue    { color: oklch(.52 .260 265); }
+:root[data-theme="pokemon"] .a-magenta { color: oklch(.52 .231 330); }
+:root[data-theme="pokemon"] .a-cyan    { color: oklch(.52 .088 210); }
+
+:root[data-theme="pokemon"] .a-bred     { color: oklch(.40 .159 25); }
+:root[data-theme="pokemon"] .a-bgreen   { color: oklch(.40 .124 145); }
+:root[data-theme="pokemon"] .a-byellow  { color: oklch(.40 .081 95); }
+:root[data-theme="pokemon"] .a-bblue    { color: oklch(.40 .268 265); }
+:root[data-theme="pokemon"] .a-bmagenta { color: oklch(.40 .179 330); }
+:root[data-theme="pokemon"] .a-bcyan    { color: oklch(.40 .068 210); }
+
+/* `black` and `white` follow the ramp, so they invert with it: on a light field the
+ * darkest ink is the loudest and a near-white is the quietest, which is the reverse of
+ * the mapping above. --hi and --dim-2 already encode exactly that. */
+:root[data-theme="pokemon"] .a-black  { color: var(--hi); }
+:root[data-theme="pokemon"] .a-white  { color: var(--dim-2); }
+:root[data-theme="pokemon"] .a-bblack { color: var(--fg); }
+:root[data-theme="pokemon"] .a-bwhite { color: var(--dim); }
+
+:root[data-theme="pokemon"] .a-bg-red     { background: oklch(.88 .066 25); }
+:root[data-theme="pokemon"] .a-bg-green   { background: oklch(.88 .075 145); }
+:root[data-theme="pokemon"] .a-bg-yellow  { background: oklch(.88 .075 95); }
+:root[data-theme="pokemon"] .a-bg-blue    { background: oklch(.88 .058 265); }
+:root[data-theme="pokemon"] .a-bg-magenta { background: oklch(.88 .058 330); }
+:root[data-theme="pokemon"] .a-bg-cyan    { background: oklch(.88 .062 210); }
+:root[data-theme="pokemon"] .a-bg-black   { background: oklch(.82 .012 60); }
+:root[data-theme="pokemon"] .a-bg-white   { background: oklch(.99 .003 90); }
+:root[data-theme="pokemon"] .a-bg-bred, :root[data-theme="pokemon"] .a-bg-bgreen,
+:root[data-theme="pokemon"] .a-bg-byellow, :root[data-theme="pokemon"] .a-bg-bblue,
+:root[data-theme="pokemon"] .a-bg-bmagenta, :root[data-theme="pokemon"] .a-bg-bcyan,
+:root[data-theme="pokemon"] .a-bg-bblack, :root[data-theme="pokemon"] .a-bg-bwhite {
+  background: oklch(.88 .014 70);
+}
+
+.a-bold { font-weight: 700; }
+/* Dim as transparency rather than a fixed grey, so it stays dim relative to whatever
+ * colour it's modifying instead of overriding it. */
+.a-dim { opacity: 0.6; }
+.a-italic { font-style: italic; }
+.a-underline { text-decoration: underline; }
+
+/* A search hit outranks the line's own colour — the mark sets both its background and
+ * its text colour, so it stays legible over anything the container painted. */
+
+/* ── interleaved panes ─────────────────────────────────────────────────────── */
+/* Which host a line came from: a coloured gutter stripe plus its label. The stripe
+ * is what makes a merged pane scannable — you read the shape of the interleaving
+ * before you read any words. */
+.merged .line {
+  border-left: 2px solid transparent;
+  padding-left: 8px;
+}
+
+/* The stream column, sized in JS from the labels this pane actually carries
+ * (`--who-w`, clamped to 10–20ch), with a fallback for a pane that somehow renders
+ * before that lands. Fixed and non-shrinking like the time column: a host name that
+ * reflowed would take the message column's alignment with it. */
+.who {
+  flex: 0 0 var(--who-w, 12ch);
+  padding: 0 10px;
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.line.h1 { border-left-color: var(--h1); } .line.h1 .who { color: var(--h1); }
+.line.h2 { border-left-color: var(--h2); } .line.h2 .who { color: var(--h2); }
+.line.h3 { border-left-color: var(--h3); } .line.h3 .who { color: var(--h3); }
+.line.h4 { border-left-color: var(--h4); } .line.h4 .who { color: var(--h4); }
+.line.h5 { border-left-color: var(--h5); } .line.h5 .who { color: var(--h5); }
+.line.h6 { border-left-color: var(--h6); } .line.h6 .who { color: var(--h6); }
+
+.pane-legend { display: flex; gap: 8px; align-items: center; }
+
+.pane-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--ui-sm);
+  color: var(--dim);
+}
+.chip-dot { width: 9px; height: 9px; }
+.pane-chip.h1 .chip-dot { background: var(--h1); }
+.pane-chip.h2 .chip-dot { background: var(--h2); }
+.pane-chip.h3 .chip-dot { background: var(--h3); }
+.pane-chip.h4 .chip-dot { background: var(--h4); }
+.pane-chip.h5 .chip-dot { background: var(--h5); }
+.pane-chip.h6 .chip-dot { background: var(--h6); }
+
+/* The chip shows the host's name; its container's state is carried by how loudly
+ * that name is written. Running is the common case and stays quiet — a header full
+ * of chips shouldn't demand attention for the situation you expect. */
+.chip-state[data-state="exited"], .chip-state[data-state="dead"],
+.chip-state[data-state="gone"], .chip-state[data-state="unreachable"] { color: var(--hi); }
+.chip-state[data-state="paused"], .chip-state[data-state="restarting"] { color: var(--fg); }
+
+/* Timestamp ordering is only as good as the hosts' clocks — say so when they
+ * disagree, rather than presenting a confident wrong order. Same treatment for a
+ * window the host trimmed: both are "what's on screen isn't quite what you asked
+ * for", and they read as one class of warning because they are one. */
+.pane-skew, .pane-capped {
+  flex: none;
+  padding: 0 5px;
+  color: var(--hi);
+  border: 1px solid var(--line-2);
+  font-size: var(--ui-sm);
+  cursor: help;
+}
+
+/* A merged pane earns more width — it's several streams' worth of lines. */
+/* A combined pane earns more width — it's several streams' worth of lines. This
+ * is only the STARTING weight; `resizePanes` overwrites it the moment you drag. */
+.pane.merged { min-width: 420px; flex-grow: 2; }
+
+@media (max-width: 720px) {
+  main { flex-direction: column; }
+  .hosts { width: auto; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--line); }
+}
+
+/* ── live edit ─────────────────────────────────────────────────────────────── */
+/* The button that hands an agent the source path, and the panel behind it. Present
+ * only in EDIT=1 mode, so this styles something most runs never render.
+ *
+ * The button is marked with the accent but not filled by it: it isn't "on", and it
+ * isn't the answer you were looking for — it's a door. A 1px accent rule is the
+ * lightest way to say "this one is different" on the ramp described up top. */
+/* The theme switch. Deliberately the quietest control in the bar: it changes how the app
+ * looks and never what it's showing, so it should not compete with the range presets or
+ * the filter for attention. Dim text on the chrome, and it only firms up on hover. */
+.theme-btn {
+  border-color: transparent;
+  color: var(--dim);
+}
+.theme-btn:hover { border-color: var(--line-2); color: var(--fg); }
+
+.edit-btn {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--line-2));
+  color: var(--accent);
+}
+.edit-btn:hover { border-color: var(--accent); color: var(--accent); filter: brightness(1.1); }
+
+.edit-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 90;                  /* under the login gate (100): locked beats informative */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--scrim);        /* the dashboard stays visible behind it — this is a note, not a mode */
+}
+.edit-card {
+  width: 100%;
+  max-width: 680px;             /* wide enough that the brief's own line breaks survive */
+  padding: 22px 22px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  box-shadow: 6px 6px 0 var(--shadow);  /* hard offset, same as the gate and the picker */
+}
+.edit-card h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--fg);
+}
+.edit-sub {
+  margin: 0 0 14px;
+  color: var(--dim);
+  font-size: var(--ui-md);
+  line-height: 1.6;
+}
+.edit-sub code {
+  color: var(--accent);
+  font-family: var(--mono);
+  word-break: break-all;        /* a long host path must wrap rather than widen the card */
+}
+/* Monospace and pre-wrapped: the brief is written with its own line breaks, and
+ * re-flowing it would run the file-layout block together into prose. */
+.edit-brief {
+  width: 100%;
+  height: 42vh;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+  line-height: 1.65;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+.edit-brief:focus { border-color: var(--line-2); outline: none; }
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+/* The "your tab is out of date" prompt. Bottom-right rather than a bar across the top:
+ * it must not reflow the panes, because the whole point is that you haven't reloaded yet
+ * and everything on screen should stay exactly where it is. */
+.edit-stale {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 95;                  /* above the panes, below the edit panel's backdrop */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(460px, calc(100vw - 32px));
+  padding: 10px 12px;
+  background: var(--panel-2);
+  /* Marked on one edge only. This is news, not an error — the accent says "look here"
+   * without the box shouting in a colour the rest of the chrome doesn't use. */
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--accent);
+  box-shadow: 4px 4px 0 var(--shadow);
+  color: var(--fg);
+  font-size: var(--ui-md);
+  line-height: 1.5;
+}
+.edit-stale button { flex: none; }
+#edit-stale-dismiss {
+  padding: 2px 7px;
+  border-color: transparent;
+  color: var(--dim);
+}
+#edit-stale-dismiss:hover { color: var(--hi); border-color: var(--line-2); }
+
+/* ── the pokéball ──────────────────────────────────────────────────────────────
+ * One per pane header, pokédex mode only. Built in app.js (see `pokeball()`); every
+ * colour is a custom property so this file decides what it looks like — including not
+ * showing it at all, which is how yeet mode stays a monochrome terminal.
+ *
+ * IT CARRIES STATE, and that's the difference between a mark and a sticker: full when
+ * something in the pane is running, hollow when nothing is. The one joke the object
+ * actually supports — a pane is a container you caught. Never the only signal, in keeping
+ * with everything else here: the state text beside it says the same in words.
+ *
+ * Against the pane header (#e2ddd5) the parts measure: outline 10.89:1, pokéball red
+ * 3.56:1 — both past the 3:1 WCAG asks of non-text graphics. The white shell is 1.33:1
+ * and doesn't need more: the dark outline encloses it, so the outline is what defines the
+ * shape, not the fill.
+ */
+.pb { display: none; }               /* yeet mode: there is no ball */
+.pb-top, .pb-bottom, .pb-button, .pb-edge, .pb-band { transition: fill .25s, stroke .25s; }
+
+:root[data-theme="pokemon"] .pb {
+  --pb-red: oklch(.58 .226 29);      /* #e11c15 — the toy's own red */
+  --pb-ink: oklch(.28 .02 40);       /* outline and seam */
+  --pb-shell: oklch(.995 .002 90);   /* lower half and the button */
+  display: block;
+  flex: none;
+}
+:root[data-theme="pokemon"] .pb-top    { fill: var(--pb-red); }
+:root[data-theme="pokemon"] .pb-bottom { fill: var(--pb-shell); }
+:root[data-theme="pokemon"] .pb-edge   { fill: none; stroke: var(--pb-ink); stroke-width: 1.4; }
+:root[data-theme="pokemon"] .pb-band   { stroke: var(--pb-ink); stroke-width: 1.6; }
+:root[data-theme="pokemon"] .pb-button { fill: var(--pb-shell); stroke: var(--pb-ink); stroke-width: 1.4; }
+
+/* Nothing running in this pane: the ball opens. Red drains out of the shell and the
+ * button goes dark — an empty ball, which is exactly what a stopped container is. */
+:root[data-theme="pokemon"] .pb[data-state="stopped"] {
+  --pb-red: oklch(.68 .012 50);
+  --pb-ink: oklch(.52 .015 45);
+}
+:root[data-theme="pokemon"] .pb[data-state="stopped"] .pb-button { fill: oklch(.82 .012 60); }
+
+/* Live: the button glows, once every two seconds. Slow and small on purpose — it sits in
+ * every open pane, so anything faster would turn a six-pane screen into a fairground. */
+@keyframes pb-pulse {
+  0%, 100% { fill: var(--pb-shell); }
+  50%      { fill: var(--accent); }
+}
+:root[data-theme="pokemon"] .pb[data-state="running"] .pb-button {
+  animation: pb-pulse 2s ease-in-out infinite;
+}
+/* Motion is the accelerator, never the message — the ball is still full, which is the
+ * actual signal. Anyone who asked for less motion loses nothing but the blink. */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="pokemon"] .pb[data-state="running"] .pb-button { animation: none; }
+}
+
+/* ── the same ball, in the container list ──────────────────────────────────────
+ * The sidebar's state mark is a small square in yeet mode and this ball in pokédex mode. Both
+ * are in the markup; here is where one of them goes away. Not a JS branch, so switching theme
+ * never re-renders the list — the same arrangement the pane headers use.
+ *
+ * NO PULSE HERE, and that's the important line. The pane header's ball blinks its button once
+ * every two seconds, which is calm when there are six panes and a fairground when a host has
+ * forty running containers listed down the side. The full ball already says "running"; the
+ * blink was only ever the accelerator on it, so dropping it costs nothing that matters. */
+:root[data-theme="pokemon"] .attach .dot { display: none; }
+:root[data-theme="pokemon"] .attach .pb[data-state="running"] .pb-button { animation: none; }
+
+/* The sign-in card's mark, one per theme. Both are in the markup and CSS picks — the gate
+ * is the first thing anyone sees, so it must already be wearing the right skin rather than
+ * changing under them a moment later. */
+.gate-ball { display: none; }
+:root[data-theme="pokemon"] .gate-mark { display: none; }
+:root[data-theme="pokemon"] .gate-ball {
+  display: block;
+  margin: 0 auto;
+  --pb-red: oklch(.58 .226 29);
+  --pb-ink: oklch(.28 .02 40);
+  --pb-shell: oklch(.995 .002 90);
+}
+
+/* The empty pane area, watermarked. This is the largest blank space in the app before you
+ * attach anything, and leaving it as one line of grey text is the difference between a
+ * skin and a recolour.
+ *
+ * The colours are baked into the data URI rather than taken from custom properties, because
+ * `url()` cannot read a var(). That's acceptable exactly here: it's a decorative watermark
+ * at 6% opacity, it appears in one theme only, and nothing about the interface depends on
+ * its colour being derived. Anything load-bearing stays in the properties above.
+ *
+ * `%23` is `#` — a raw hash inside url() ends the URI as a fragment and the image silently
+ * never loads. */
+:root[data-theme="pokemon"] .panes > .empty {
+  position: relative;
+  padding-top: 200px;
+}
+/* A pseudo-element, so the fade applies to the watermark and NOT to the sentence: opacity
+ * on the paragraph itself would take its text down with the image. Behind the text, and
+ * `pointer-events: none` so a giant invisible ball can't eat a click. */
+:root[data-theme="pokemon"] .panes > .empty::before {
+  content: "";
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  width: 150px;
+  height: 150px;
+  transform: translateX(-50%);
+  opacity: 0.12;
+  pointer-events: none;
+  background: no-repeat center/contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 8A7 7 0 0 1 15 8Z' fill='%23e11c15'/%3E%3Cpath d='M1 8A7 7 0 0 0 15 8Z' fill='%23fefdfc'/%3E%3Ccircle cx='8' cy='8' r='7' fill='none' stroke='%23322621' stroke-width='1.2'/%3E%3Cpath d='M1 8h14' stroke='%23322621' stroke-width='1.4'/%3E%3Ccircle cx='8' cy='8' r='2.7' fill='%23fefdfc' stroke='%23322621' stroke-width='1.2'/%3E%3C/svg%3E");
+}
+
+/* ── the pane header, as a blue island ─────────────────────────────────────────
+ * The device's screen has a bezel, and this is it: the creature, the name and the state
+ * sitting on the logo blue with the log text below on the pale page.
+ *
+ * Re-inked through inherited custom properties, exactly the way `.bar` does the crimson — the
+ * rules that paint this header already read `--panel-2`, `--line`, `--dim`, `--accent` and the
+ * rest, so redefining those HERE flips the whole header, its chips and its two buttons without
+ * touching a single one of them. Declaring `--panel-2` on the same element that reads it for
+ * `background` is fine: a custom property resolves on the element it's declared on.
+ *
+ * The blue is a shade under the logo's own #3b4cca, which is as light as a colour can be while
+ * carrying text this small. Measured against it (WCAG, sRGB, all values in gamut):
+ *   --hi 8.87:1   --fg 7.19:1   --dim 5.19:1   --accent 6.30:1
+ *   --line 3.04:1 and --line-2 3.57:1 — borders, so the 3:1 for non-text graphics is the bar
+ *   the header on the page itself 8.99:1, so the island reads as an edge, not a tint
+ *
+ * `--accent` is the bright #facc00 rather than the page's deep amber, and that is the same
+ * choice the top bar makes for the same reason: the claim is "this is live", and yellow has to
+ * be dark to hold on white and bright to hold on a saturated ground. Same meaning, spelled in
+ * the value that survives the surface. State still lives in `--accent`/`--hi`/`--fg` alone —
+ * this changes what those are worth here, not what they mean. */
+:root[data-theme="pokemon"] .pane-head {
+  /* SET `color` TOO, don't just redefine `--fg`. Re-inking through custom properties only
+   * reaches text whose rule actually says `var(--fg)`; the pane's NAME (`.pane-container`)
+   * sets no colour at all and inherits the computed dark ink from the page, which a redefined
+   * property cannot reach — a computed colour is a colour, not a live reference. So the one
+   * piece of text in this header that matters most stayed near-black on the blue.
+   *
+   * `.bar` gets away without this by accident: every text node in it — the wordmark, the
+   * inputs, the hint — names its own colour, so there is nothing inheriting. This header has
+   * exactly one thing that inherits, and it's the container's name. */
+  color: var(--fg);
+  --panel-2: oklch(.40 .17 267);    /* #1f3aa1 — the header itself */
+  --hi: oklch(.97 .012 250);        /* stderr, errors, a hovered control */
+  --fg: oklch(.90 .03 250);         /* an ended or paused stream */
+  --dim: oklch(.80 .05 250);        /* the host, the chips, a control at rest */
+  --accent: oklch(.86 .176 92);     /* #facc00 — running, streaming */
+  --line: oklch(.66 .15 267);       /* the chip outlines and this header's own bottom rule */
+  --line-2: oklch(.70 .13 265);     /* the louder outline: the capped/skew chips */
+
+  /* THE STREAM HUES, LIFTED. A merged pane's header is a row of host chips, one per member,
+   * each written in the hue its lines wear in the body — so these six have to survive here
+   * too. The page's set is built at lightness .50 for a pale ground, which on this blue is
+   * 1.2–1.6:1: `--h5` is a blue at .50 on a blue at .40, which is not a colour, it's a rumour.
+   *
+   * Same construction as the page's set, one step up: a single lightness with chroma pushed to
+   * the gamut edge per hue. Against #1f3aa1 —
+   *   h1 6.30:1   h2 6.11:1   h3 6.05:1   h4 6.29:1   h5 5.85:1   h6 4.58:1
+   * — all past 4.5 for the 11px text they label, all in sRGB gamut.
+   *
+   * Red is the exception at .78, and pulled to hue 20: at a shared .84 it and the magenta sat
+   * ΔE 0.086 apart, tighter than the page set's own closest pair (0.104) — and these six exist
+   * precisely to be told apart, so a member's colour is worth nothing if two of them read as
+   * the same pink. Separating them on lightness as well as hue puts the closest pair at 0.097
+   * (h3/h5), which is the page's spacing to within rounding. The trade is red's 4.58:1, the
+   * lowest here and still over the line.
+   *
+   * `--h1` has to be restated even though it's `var(--accent)` at the root and this block
+   * already redefines `--accent`: a custom property inherits its SUBSTITUTED value, so the
+   * root's `--h1` arrived here as the page's deep amber and knew nothing about the override.
+   * Naming it again re-resolves it against this header's accent. */
+  --h1: var(--accent);              /* #facc00, the header's own yellow */
+  --h2: oklch(.84 .12 218);         /* teal */
+  --h3: oklch(.86 .105 338);        /* magenta */
+  --h4: oklch(.84 .16 158);         /* green */
+  --h5: oklch(.84 .08 278);         /* blue — the gamut runs out first up here */
+  --h6: oklch(.78 .125 20);         /* red, held down and off 24 to clear the magenta */
+}
+
+/* A container's creature, in place of the drawn pokéball, when public/sprites/ has a file
+ * for it. Same box as the ball so the header doesn't shift depending on which one you get.
+ * Pokédex mode only, like everything else in this section. */
+.pane-sprite { display: none; }
+:root[data-theme="pokemon"] .pane-sprite {
+  display: block;
+  flex: none;
+  /* Much bigger than the text it sits beside, deliberately. These are detailed little
+   * drawings and anywhere near header-text size they read as coloured smudges — the whole
+   * point is being able to tell one pane's creature from another's at a glance. It sets the
+   * header's height at this size (the row is otherwise 12px text in 6px of padding), which
+   * is the cost and is why the number lives here rather than being tied to the font.
+   *
+   * The ball below is sized with it so the header doesn't shift depending on which one a
+   * pane gets; it stays the smaller number because a sprite letterboxes inside its box
+   * while the ball fills it edge to edge. */
+  width: 44px;
+  height: 44px;
+  object-fit: contain;       /* a non-square sprite letterboxes rather than distorting */
+  image-rendering: auto;
+}
+
+/* The time scrubber's handles, wearing the two `_slider-*` sprites.
+ *
+ * `--thumb` is set from JS (see the sprite loader in app.js) because a slider thumb is a
+ * pseudo-element and cannot be reached any other way. It is UNSET when no sprite file
+ * exists, and the `background-image` below then resolves to nothing and leaves the plain
+ * accent-coloured handle exactly as yeet mode has it — so a missing file costs the picture,
+ * never the control.
+ *
+ * The handles get much wider here (9px → 40px) so a creature is actually legible — at sprite
+ * sizes the difference between two of these is a few pixels of silhouette, and a handle you
+ * have to lean in to identify may as well be the plain accent block. That changes nothing
+ * about the geometry: every position in this scrubber — the fill band, the ticks, the bubble
+ * — is computed from the input's VALUE as a percentage, never from the thumb's width, so a
+ * fatter handle moves no numbers.
+ *
+ * The TRACK grows to match rather than the thumbs overflowing it, which is what keeps the
+ * rest of the row honest at this size:
+ *   · a thumb taller than its own input is clipped by the input's box in Firefox, which
+ *     would shave the top off every sprite;
+ *   · the rail and the band sit at `top: 50%`, so a taller track re-centres them under the
+ *     handles instead of leaving them riding high;
+ *   · the tick labels hang off `top: 100%` and the bubble off `bottom: 100%`, so both stay
+ *     clear of a 40px handle automatically — with the thumbs overflowing a 20px track they'd
+ *     be sitting on top of the labels below.
+ * Vertical only: nothing here is measured along the axis the scrubber reads. */
+:root[data-theme="pokemon"] .scrub-track {
+  height: 40px;
+  margin-bottom: 14px;
+}
+:root[data-theme="pokemon"] .scrub-track input[type="range"] {
+  height: 40px;
+}
+:root[data-theme="pokemon"] .scrub-track input[type="range"]::-webkit-slider-thumb {
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: var(--thumb) center/contain no-repeat, transparent;
+  /* A dropped shadow rather than a border: the sprites are irregular shapes, so a box
+   * around one would outline the box and not the creature. */
+  filter: drop-shadow(0 1px 1px oklch(.3 .03 30 / .45));
+}
+:root[data-theme="pokemon"] .scrub-track input[type="range"]::-moz-range-thumb {
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: var(--thumb) center/contain no-repeat, transparent;
+  filter: drop-shadow(0 1px 1px oklch(.3 .03 30 / .45));
+}
+/* The focus ring has to survive a transparent, irregular handle: an outline on a shape with
+ * no edges is invisible, so focus is drawn on the input itself instead. */
+:root[data-theme="pokemon"] .scrub-track input[type="range"]:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+
+/* ── heavier rules ─────────────────────────────────────────────────────────────
+ * A pokédex is a moulded plastic object, and what says so is the weight of its edges: thick
+ * borders around every panel, every readout, every button. A 1px hairline is the language of
+ * the terminal this app is in yeet mode, which is why the weights live here and not in the
+ * base rules.
+ *
+ * WIDTHS ONLY, never the whole `border` shorthand — the colours are the palette's job and
+ * several of these change under state (`.pane-docker[data-state]`, a focused input, the
+ * picker's primary button). Setting `border: 3px solid var(--line)` here would quietly
+ * outrank all of that.
+ *
+ * Three weights, and the distinction is what keeps it from reading as a uniform outline:
+ *   3px  the case — the two rules that divide the app into regions
+ *   2px  a component's own edge — anything you click, type into, or read a value out of
+ *   1px  left alone — the log body's own gutters, so the text stays the calmest thing here
+ *
+ * Everything here already sits in a `border-box` (see the reset), so nothing grows: the extra
+ * pixels come out of padding, not out of the layout. */
+:root[data-theme="pokemon"] .bar { border-bottom-width: 3px; }
+:root[data-theme="pokemon"] .pane-head { border-bottom-width: 3px; }
+:root[data-theme="pokemon"] .hosts { border-right-width: 3px; }
+
+:root[data-theme="pokemon"] input,
+:root[data-theme="pokemon"] button,
+:root[data-theme="pokemon"] select,
+:root[data-theme="pokemon"] .picker,
+:root[data-theme="pokemon"] .picker-badge,
+:root[data-theme="pokemon"] .pane-docker,
+:root[data-theme="pokemon"] .pane-skew,
+:root[data-theme="pokemon"] .pane-capped {
+  border-width: 2px;
+}
+/* Nothing needed for the glyph buttons — the merge `+`, the `×`, the sidebar rows all set
+ * `border: none`, and a style of `none` means no border at any width. They stay unboxed, which
+ * is right: they're glyphs, and a row that already holds an icon, a name and three chips does
+ * not need two more outlines in it. */

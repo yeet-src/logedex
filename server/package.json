@@ -1,0 +1,13 @@
+{
+  "name": "logedex-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node server that reads container state from the local yeet system graph, fans the same queries out across a list of hosts, and serves the log dashboard",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test *.test.js public/*.test.js ../shared/*.test.js"
+  }
+}

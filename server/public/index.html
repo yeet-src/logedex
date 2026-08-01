@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logédex</title>
+<link rel="stylesheet" href="/style.css">
+<!-- Set by theme.js, so the tab icon matches the skin. Empty to begin with rather than a
+     file, because there is no icon on disk to serve and a missing one costs a 404 per
+     load. -->
+<link rel="icon" id="favicon" href="data:,">
+<!-- The saved theme, applied before the first paint.
+     Inline and blocking on purpose: app.js is a module, so it runs after the document is
+     parsed and painted — setting the theme there means everyone who chose pokédex mode
+     watches the yeet palette flash first, on every single load. This is the one thing
+     that has to happen before the browser draws, so it's the one script that lives here.
+     Wrapped in try/catch because localStorage throws outright in a few privacy modes,
+     and the wrong theme is a far better outcome than a page that stops executing. -->
+<script>
+  try {
+    var t = localStorage.getItem("logedex.theme");
+    if (t === "pokemon") document.documentElement.dataset.theme = t;
+  } catch (e) { /* default theme it is */ }
+</script>
+</head>
+<body>
+<header class="bar">
+  <!-- The wordmark as artwork. The <h1> stays: it's the document's heading and the alt text is
+       the app's name, so the page outline is unchanged for a screen reader or a text browser —
+       and if the file ever goes missing, the alt text renders in the h1's own styles, which is
+       why those are still there. Dimensions are the file's intrinsic ones so the bar reserves
+       the right space before it loads; CSS sets the drawn height. -->
+  <h1><img class="wordmark" src="/logedex-mark.png" alt="Logédex" width="319" height="108"></h1>
+  <form id="add-host" class="add-host" autocomplete="off">
+    <input id="host-url" type="text" placeholder="box.lan:8080 or https://host.example.com" aria-label="host URL" required>
+    <input id="host-label" type="text" placeholder="label (optional)" aria-label="host label">
+    <button type="submit">add host</button>
+  </form>
+  <span id="hint" class="hint" role="status"></span>
+
+  <!-- Which skin the app wears: yeet (dark, matches yeet.cx) or pokédex (light, after the
+       name). A two-state button rather than a select, because there are two of them and
+       the label can just say what you'll get. -->
+  <button type="button" id="theme-btn" class="theme-btn"
+          title="switch theme — yeet is dark, pokédex is light" aria-live="polite"></button>
+
+  <!-- Only shown when the server reports live-edit mode (EDIT=1 / `make edit`), where
+       the code it's running is bind-mounted back out to the host for an agent to
+       rewrite. Hidden by default so the button never appears on an ordinary run. -->
+  <button type="button" id="edit-btn" class="edit-btn" hidden
+          title="how to point an AI agent at this dashboard's source">live edit</button>
+
+  <!-- The time range is global on purpose: one control moves every pane to the
+       same window, which is what makes streams from different hosts comparable. -->
+  <div class="range" role="group" aria-label="time range">
+    <button type="button" data-range="live" class="on">live</button>
+    <button type="button" data-range="900">15m</button>
+    <button type="button" data-range="3600">1h</button>
+    <button type="button" data-range="21600">6h</button>
+    <button type="button" data-range="custom">custom…</button>
+    <span id="range-note" class="range-note"></span>
+  </div>
+
+  <!-- The scrubber. Its full width is the log history actually reachable in the
+       open panes — left edge is the oldest line any of them can serve, right edge is
+       now — so dragging is relative to the view rather than to absolute clock time.
+       Right handle at the far end means "no end": keep following. -->
+  <div id="scrub" class="scrub" hidden>
+    <span class="scrub-edge" id="scrub-from">—</span>
+    <div class="scrub-track">
+      <!-- The selected window, and the grip for moving it: drag the band (or use the
+           arrow keys) to slide the whole window without changing how wide it is. -->
+      <div class="scrub-fill" id="scrub-fill" tabindex="0"
+           title="drag to move the whole window; the handles at each end resize it"
+           aria-label="move the time window; left and right arrows shift it, shift for a bigger step"></div>
+      <!-- Follows the handle being dragged, with the exact time under it. -->
+      <div class="scrub-bubble" id="scrub-bubble" hidden></div>
+      <input type="range" id="scrub-a" min="0" max="1000" value="0" step="1" aria-label="window start">
+      <input type="range" id="scrub-b" min="0" max="1000" value="1000" step="1" aria-label="window end">
+      <!-- Gradations, so the scale itself is legible without dragging. -->
+      <div class="scrub-ticks" id="scrub-ticks" aria-hidden="true"></div>
+    </div>
+    <span class="scrub-edge" id="scrub-to">live</span>
+  </div>
+  <div id="scrub-readout" class="scrub-readout" hidden></div>
+
+  <!-- Search is global for the same reason the range is: one query across every
+       pane answers "where did this request id go", which is the whole point. Both
+       boxes filter the lines on screen as you type; nothing is re-fetched.
+
+       Two boxes rather than one with a `-` convention: hiding the noise is its own
+       task — health checks drowning out everything else — and it shouldn't cost you
+       a syntax to discover. The placeholders are the only labels either one needs. -->
+  <form id="find-form" class="find" autocomplete="off">
+    <input id="find-input" type="search" placeholder="filter lines…"
+           aria-label="show only lines matching" maxlength="500">
+    <input id="find-exclude" type="search" placeholder="hide lines with…"
+           aria-label="hide lines matching" maxlength="500">
+    <button type="button" id="find-clear" title="clear both" aria-label="clear both filters">×</button>
+  </form>
+</header>
+
+<!-- Absolute window, revealed by "custom…". Leaving the end empty means "from
+     then until now, and keep following". -->
+<form id="custom-range" class="custom-range" hidden>
+  <label>from <input type="datetime-local" id="range-from" step="1"></label>
+  <label>to <input type="datetime-local" id="range-to" step="1"></label>
+  <button type="submit">apply</button>
+  <button type="button" id="range-cancel">cancel</button>
+  <span class="hint">leave <em>to</em> empty to keep following · times are <span id="range-zone"></span></span>
+</form>
+
+<!-- The login gate. Covers the dashboard until `yeet whoami` resolves on this box.
+     Host-level, not per-visitor: the first person through unlocks it for everyone who
+     can reach it, which is the intent — see server/auth.js for what that means and
+     what it deliberately doesn't protect. -->
+<div id="gate" class="gate" hidden>
+  <div class="gate-card">
+    <!-- Two marks, one per theme, picked by CSS rather than by script: the sign-in card is
+         the first thing anyone sees, and it should already be wearing the right skin.
+         The ≡ is yeet's; the ball is pokédex's, and it's the same geometry as the ones in
+         the pane headers (see `pokeball()` in app.js), just larger. -->
+    <span class="gate-mark" aria-hidden="true">≡</span>
+    <svg class="gate-ball" viewBox="0 0 16 16" width="42" height="42" aria-hidden="true" focusable="false">
+      <path class="pb-top" d="M1 8A7 7 0 0 1 15 8Z"/>
+      <path class="pb-bottom" d="M1 8A7 7 0 0 0 15 8Z"/>
+      <circle class="pb-edge" cx="8" cy="8" r="7"/>
+      <path class="pb-band" d="M1 8h14"/>
+      <circle class="pb-button" cx="8" cy="8" r="2.7"/>
+    </svg>
+    <h1>Logédex</h1>
+    <p class="gate-sub">This dashboard is locked. Sign in with <b>yeet</b> to continue.</p>
+    <button type="button" id="gate-login" class="gate-btn">sign in with yeet</button>
+    <div id="gate-link" class="gate-link" hidden>
+      <p>A tab opened to authorise. Didn't open? Use this link:</p>
+      <a id="gate-url" href="#" target="_blank" rel="noopener"></a>
+      <div class="gate-wait"><span class="spinner"></span> waiting for you to finish…</div>
+    </div>
+    <p id="gate-error" class="gate-error" hidden></p>
+  </div>
+</div>
+
+<!-- Shown when the dashboard's own files change on disk while you're looking at an older
+     copy of them — i.e. an agent just rewrote the frontend. Offers a reload rather than
+     taking one: reloading by itself would discard your open panes and filters, possibly
+     mid-incident. Only ever appears in live-edit mode. -->
+<div id="edit-stale" class="edit-stale" role="status" hidden>
+  <span>The dashboard's code changed on disk. This tab is running the older copy.</span>
+  <button type="button" id="edit-stale-reload">reload</button>
+  <button type="button" id="edit-stale-dismiss" aria-label="dismiss">×</button>
+</div>
+
+<!-- The live-edit briefing. A textarea rather than a <pre>: the text is meant to leave
+     here and land in an agent, so it has to be selectable and copyable even where the
+     clipboard API is blocked (any plain-HTTP origin that isn't localhost — i.e. most
+     of the ways this dashboard actually gets opened). -->
+<div id="edit-panel" class="edit-panel" hidden>
+  <div class="edit-card" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+    <h2 id="edit-title">Edit this dashboard while it runs</h2>
+    <p class="edit-sub">The server is running from
+      <code id="edit-path"></code> — a bind mount on this host. Point an agent at it;
+      backend saves restart the server on their own, frontend saves just need a reload.
+    </p>
+    <textarea id="edit-brief" class="edit-brief" readonly rows="10"
+              aria-label="instructions to paste into an AI agent"></textarea>
+    <div class="edit-actions">
+      <button type="button" id="edit-copy">copy</button>
+      <button type="button" id="edit-close">close</button>
+    </div>
+  </div>
+</div>
+
+<main>
+  <!-- Left: every host in the list, each with its containers. Clicking a
+       container attaches its logs as a pane on the right. -->
+  <aside id="host-panel" class="hosts">
+    <div class="hosts-bar">
+      <!-- Folds the whole sidebar away to a rail. Stays put when collapsed, so the
+           way back is exactly where the way out was. -->
+      <button type="button" id="hosts-toggle" class="hosts-toggle"
+              title="hide the container list (ctrl+B)" aria-label="hide the container list"
+              aria-expanded="true" aria-controls="hosts">«</button>
+      <!-- Finding a container by name, when a fleet has more of them than fit on a
+           screen. Type to narrow, ↑/↓ to move, Enter to attach the highlighted one —
+           so the common case never needs the mouse. -->
+      <input id="host-filter" type="search" class="host-filter"
+             placeholder="find a container…" aria-label="find a container" maxlength="120">
+    </div>
+    <div id="hosts" class="host-list">
+      <p class="empty">loading hosts…</p>
+    </div>
+  </aside>
+
+  <!-- Right: the attached streams, side by side. -->
+  <section id="panes" class="panes">
+    <p class="empty">Pick a container to attach its logs.</p>
+  </section>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
