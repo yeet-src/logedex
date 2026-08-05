@@ -28,17 +28,31 @@ API: no agent protocol, no log shipper, no index, no eBPF.
 > others by calling the exact endpoints it answers for itself. Nothing registers and
 > nothing is discovered. You type a URL.
 
-## Contents
+## Have an agent set it up
 
-- [Quick start](#quick-start) · [Running a fleet](#running-a-fleet) · [Editing it with Claude](#editing-it-with-claude)
-- [Features](#features) · [Login](#login) · [Environment](#environment)
-- [Requirements](#requirements) · [FAQs](#faqs) · [How it works](#how-it-works) · [License](#license)
+Paste this into a coding agent on the Linux box you want logs from. It clones the repo,
+brings the dashboard up with something logging into it, and tells you whether it worked.
 
-## Quick start
+```text
+Clone https://github.com/yeet-src/logedex and get it running on this machine,
+then tell me whether it actually works.
 
-Two ways in. Run it on a box you're sitting at, or hand it to an agent and change it.
+Read AGENTS.md before you run anything; it has the boot order and the traps.
+Run `make demo` before `make up` — an empty dashboard looks identical to a
+broken one, so there needs to be something writing log lines first.
 
-### Run it yourself
+Verify with `curl localhost:8080/api/containers` and tell me whether web-01,
+api-02 and worker-03 are listed. "The container is up" is not the same as
+"it works".
+
+This needs real Linux and a real Docker socket. If this machine is Docker
+Desktop or OrbStack, stop and say so: you'd be listing the VM's containers
+instead of this host's.
+```
+
+Prefer to drive it yourself? [Manual install](#manual-install) is two commands.
+
+## Manual install
 
 For one host you have a shell on. Nothing to configure.
 
@@ -59,51 +73,6 @@ directory owned by you instead of root, passes this machine's `hostname -s` in a
 box's label (inside a container `hostname` is the container id, which names the wrong
 thing), and reaches for `sudo docker` if you're not in the `docker` group. Rename the box
 later with `make up LOCAL_LABEL=web-01`.
-
-### Have an agent run it
-
-For when you want to change it, not just look at it. Every run mounts the app's own
-source out to the host and serves from there, so an agent rewrites the running dashboard
-without a rebuild or a restart.
-
-```sh
-git clone https://github.com/yeet-src/logedex.git && cd logedex
-```
-
-Open your agent in that directory and paste this:
-
-```text
-Get Logédex running on this machine and confirm it works.
-
-1. Read AGENTS.md first. It has the boot order and the gotchas.
-2. Run `make demo` before `make up`. An empty dashboard looks identical to a
-   broken one, so there needs to be something writing log lines first.
-3. Verify with `curl localhost:8080/api/containers` and tell me whether the
-   three demo containers (web-01, api-02, worker-03) are listed. "The
-   container is up" is not the same as "it works".
-4. If anything fails, check `docker logs logedex` and the crash log named in
-   AGENTS.md before changing anything.
-
-This has to run on real Linux with a real Docker socket. If we're on a
-Docker Desktop or OrbStack VM, say so and stop: you'd be listing the VM's
-containers, not this host's.
-```
-
-That's the whole handoff. [`AGENTS.md`](AGENTS.md) carries the rest: the module map, the
-two reload loops, where a crash gets written, and the runtime constraints of the isolate
-that `agent/` runs in, which reading the source won't tell you.
-
-Why hand this over rather than do it by hand:
-
-- **The running app serves its own source.** Edits land in a live process, so the loop is
-  save and look instead of rebuild and wait.
-- **The dashboard briefs the agent itself.** The **live edit** button in the top bar
-  prints instructions built from this deployment's real paths rather than an example.
-- **A broken edit is quiet.** The container stays `Up` while nothing answers on the port,
-  and the traceback goes somewhere you'd have to know to look. `docker ps` will tell you
-  everything is fine. AGENTS.md says where the log is.
-
-[Editing it with Claude](#editing-it-with-claude) has the whole loop.
 
 ### The plain `docker run`
 
@@ -133,7 +102,7 @@ A few notes on that command:
 - **`/data`** is where the host list and alert rules are persisted. Mount something there
   or they go away with the container.
 - **`/edit`** is the app's own source, which the container serves out of. See
-  [Editing it with Claude](#editing-it-with-claude).
+  [Live editing](#live-editing).
 
 **The Docker socket is the only grant it needs** — no `--privileged`, no BPF
 capabilities, no host PID namespace. That socket is also the whole security story: the
@@ -163,7 +132,7 @@ docker run -d --name logedex --network host \
 
 ## Running a fleet
 
-One instance per box. Run the quick start on **every host you want logs from**, then pick
+One instance per box. Run the manual install on **every host you want logs from**, then pick
 one as the box you point a browser at. That instance fans out to the others by calling the
 same endpoints it answers for itself, so there's nothing extra to install on the ones it
 reaches.
@@ -192,66 +161,44 @@ don't have to agree on a yeetd version, since each answers for itself.
 
 Walking a stack of boxes through the same two commands is the part to hand to an agent.
 
-## Editing it with Claude
+## Live editing
 
-**This dashboard is yours to rewrite, and you don't have to stop it to do it.**
+Every run mounts the app's own source out to the host and serves from there, so you can
+rewrite any part of it while it keeps serving. No rebuild, no restart, no `docker exec`.
+It's built for pointing an AI agent at the dashboard.
 
 ```sh
-git clone https://github.com/yeet-src/logedex.git && cd logedex
-make demo && make edit
+make edit           # the same as `make up`, then prints where the source landed
 ```
 
-`make edit` prints a directory on your machine. That directory is the running app. Not a
-copy of it, not the version baked into the image: the files in there are the ones
-executing right now, and the server is reading them off disk. Change one and the change is
-live in about a second.
+The source lands at `~/.local/state/logedex/src` by default. Save a `.js` file under
+`server/`, `shared/` or `agent/` and the server restarts itself in about a second, with
+open panes reconnecting on their own; save something under `server/public/` and the
+dashboard offers you a reload in the corner. If an edit doesn't parse, the server stays
+down until you fix it and the crash is in `.logedex/server.log`.
 
-That includes `agent/logstream.js`, which runs inside the yeet daemon's isolate and is
-where the log data actually comes from. So "change the dashboard" goes all the way down to
-how it talks to Docker. There is no part of this you have to live with.
+Your edits survive restarts and image upgrades. The mount is the source of truth once
+seeded, and the startup log tells you when the image has diverged from it. To go back:
 
-Point your agent at that directory:
+```sh
+make up EDIT_RESET=1        # discard the edits, re-seed from the image
+```
 
-> Read AGENTS.md. The dashboard is running on :8080 with three demo containers attached.
-> <what you want different.> Don't rebuild or restart the container.
+The `Dockerfile`, entrypoint and `Makefile` are deliberately not in there, since changing
+them needs a rebuild anyway.
 
-Then watch it in the browser while it works. Panes reconnect on their own, so you keep
-your layout.
+[`AGENTS.md`](AGENTS.md) carries what reading the source won't tell you: boot order, the
+test command, and the isolate's missing globals (no `fetch`, no `fs`, no `Intl`) that make
+`agent/` unlike everything around it. [`CLAUDE.md`](CLAUDE.md) points at the same file, so
+either name works.
 
-### What to know before you start
-
-**The dashboard writes its own instructions.** Click **live edit** in the top bar and it
-prints a briefing built from your paths, with the layout and the reload rules. Paste it in
-and your agent starts oriented instead of guessing. That briefing lives in
-[`server/public/edit.js`](server/public/edit.js), which is one of the files you can edit,
-so an agent that finds the instructions unclear can improve them.
-
-**[`AGENTS.md`](AGENTS.md) covers what reading the source won't tell you.** Boot order, the
-test command, where a crash gets written, and the isolate's missing globals (no `fetch`, no
-`fs`, no `Intl`) that make `agent/` unlike everything around it.
-[`CLAUDE.md`](CLAUDE.md) points at the same file, so either name works.
-
-**Two reload loops, and knowing which is which saves the most time:**
-
-| you saved | what happens |
-| --- | --- |
-| `server/**.js`, `shared/**.js`, `agent/**.js` | server restarts itself in ~1s, open panes reconnect |
-| `server/public/**` | nothing restarts, the dashboard offers you a reload in the corner |
-| `Dockerfile`, `Makefile`, `docker/entrypoint.sh` | not in the mount, so these need a rebuild |
-
-**A broken edit is recoverable and quiet.** If a file doesn't parse, the server stays down
-until you fix it, and the traceback is waiting in `.logedex/server.log` under that same
-directory. The container still reads as `Up`, so trust the log over `docker ps`. To throw
-your changes away and start from the image again: `make up EDIT_RESET=1`.
-
-Your edits survive restarts and image upgrades. Once that directory is seeded it's the
-source of truth, and nothing overwrites it unless you ask.
+<!-- <img src="assets/features/live-edit.gif" alt="Editing a file on the host and seeing the dashboard change" width="820"> -->
 
 > **What you're granting.** That directory is code this container executes, and the
 > container holds the Docker socket, so anything that can write to it has root on the box.
-> Nothing is writable over HTTP (there is no endpoint that changes a file), and `/app`
-> inside the image is never touched. If you don't want that, don't mount `/edit`: the app
-> still runs, with the source reachable only through `docker exec`.
+> Nothing is writable over HTTP (there is deliberately no endpoint that changes a file),
+> and `/app` inside the image is never touched. If you don't want it, don't mount `/edit`:
+> the app still runs, with the source reachable only via `docker exec`.
 
 ## Features
 
@@ -351,8 +298,6 @@ The top-bar button switches between **yeet mode** (dark, the default) and **pok�
 placeholders, so drop your own into `server/public/sprites/` and reload.
 
 <!-- <img src="assets/features/themes.gif" alt="Switching between yeet mode and pokedex mode" width="820"> -->
-
-### Environment
 
 ## Login
 
@@ -479,7 +424,7 @@ server/public/ansi.js    escape sequences → text plus styled runs
 server/public/edit.js    the live-edit panel, and the agent briefing it prints
 ```
 
-Run the tests with `cd server && npm test` — node's built-in runner, nothing to install.
+Run the tests with `cd server && npm test`. Node's built-in runner, nothing to install.
 
 ### HTTP surface
 
