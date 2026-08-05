@@ -57,15 +57,23 @@ host. That directory is where you work. See [The two loops](#the-two-loops).
 ## Tests
 
 ```sh
-cd server && npm test
+cd server && npm test      # all eight files, including ../shared/*.test.js
+cd shared && node --test    # just the two shared ones, if that's all you touched
 ```
 
-Node's built-in runner, nothing to install. Eight test files:
-`server/{assets,auth,alerts}.test.js`, `server/public/{ansi,entries,order}.test.js`,
-`shared/{search,limits}.test.js`. The pure logic (query parsing, the window cap, ANSI
-parsing, multi-line grouping, merge ordering) is all covered; the HTTP routes and the
-streaming lifecycle are not. If you change `shared/` or any `public/*.js` with a test
-file next to it, run these. They're fast.
+Node's built-in runner, nothing to install. `server`'s `npm test` globs
+`*.test.js public/*.test.js ../shared/*.test.js`, so it is the one command that covers
+everything: `server/{assets,auth,alerts}`, `server/public/{ansi,entries,order}`, and
+`shared/{search,limits}`. The pure logic (query parsing, the window cap, ANSI parsing,
+multi-line grouping, merge ordering) is covered; the HTTP routes and the streaming
+lifecycle are not.
+
+> **Two `alerts.test.js` cases fail on fast hardware, and it is not your edit.** The ReDoS
+> canary (`server/redos.js`) refuses a pattern that burns its 250ms budget against 24-char
+> adversarial probes. On a quick machine `(a+)+$` finishes inside that budget (~153ms on an
+> M-series Mac), so it is accepted and the two "should be refused" assertions fail. The
+> guard's verdict is host-speed dependent. Confirm against a clean checkout before assuming
+> you broke it.
 
 ## Layout
 
@@ -181,11 +189,28 @@ the watch set even though the Node process never imports it.
 
 ## Diagnosing
 
+**Three runtimes load code from this tree, and each fails somewhere different.** Look in
+the right place before concluding anything:
+
+| broke | where it shows |
+| --- | --- |
+| the server (`server/*.js`) | crash in `<source-dir>/.logedex/server.log`, port stops answering |
+| the browser (`server/public/*`) | browser console; the server stays up and healthy |
+| the isolate (`agent/*.js`) | one stream dies or shows an error; the server never notices |
+
+`shared/` spans all three, which is the trap. `shared/limits.js` is imported by the server
+(`index.js`, `logs.js`); `shared/search.js` is imported by the browser **and** by
+`agent/logstream.js` in the isolate. So breaking `search.js` leaves the server answering
+normally, `/healthz` green and the container `healthy`, while the page or a stream quietly
+stops working. **If the server is up but the dashboard is wrong, the browser console is
+where to look, not the server log.**
+
 **A broken edit takes the server down and leaves it down.** `node --watch` waits for the
 fix rather than exiting, so the container stays `Up` while nothing answers on the port.
 The traceback is at `<source-dir>/.logedex/server.log`, truncated per container start.
 Read that file first for any "the dashboard stopped answering" symptom. The image's
-`HEALTHCHECK` will mark the container `unhealthy`, so `docker ps` also tells you.
+`HEALTHCHECK` will mark the container `unhealthy`, so `docker ps` also tells you. Save a
+fix and it starts again on its own; nothing needs restarting by hand.
 
 **No containers listed on the local host.** The Docker socket isn't mounted, or isn't at
 `/var/run/docker.sock`. The entrypoint warns at startup but does not fail, because a
