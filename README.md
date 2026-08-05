@@ -98,9 +98,7 @@ A few notes on that command:
   yourself first does the same thing.)
 - **`--network host` and `LOCAL_LABEL`** are what make a multi-host list work. Both are
   explained under [Running a fleet](#running-a-fleet); on one box you can leave them alone.
-- **Live editing is off** in this form. Add
-  `-v "$HOME/.local/state/logedex/src:/edit" -e EDIT_SRC_HOST="$HOME/.local/state/logedex/src"`
-  to serve the app out of a directory on your machine — see [Live editing](#live-editing).
+- **Live editing is off** in this form. See [Live editing](#live-editing) to turn it on.
 - **Built it yourself?** Swap the last line for `logedex`. `make push` is what publishes
   the multi-arch tag.
 
@@ -145,34 +143,81 @@ Walking a stack of boxes through the same two commands is the part to hand to an
 
 ## Live editing
 
-Every run mounts the app's own source out to the host and serves from there, so you can
-rewrite any part of it while it keeps serving. No rebuild, no restart, no `docker exec`.
-It's built for pointing an AI agent at the dashboard.
+You can edit anything about this tool. The colors and sprites, the merge ordering, the
+filter syntax, what the sidebar shows. Also the parts you can't see: `agent/logstream.js`
+holds the Docker subscription open inside the yeet daemon, so "restyle the panes" and
+"change what gets collected in the first place" are the same size of job. The container
+serves its own source out of a bind mount and reads it back per save, so none of it needs a
+rebuild, a restart, or a `docker exec`.
+
+It's built for handing to an AI agent, and the dashboard writes the prompt for you.
+
+### Click **live edit** in the dashboard
+
+The panel names the directory on *your* host and hands you a briefing to paste
+into your coding agent: the layout, which saves restart the server and which just need a
+reload, where a crash gets written, and which three runtimes can fail independently. Copy,
+paste, describe what you want changed.
+
+The prompt is generated from this deployment's real paths: the path
+depends on what you mounted, and a plausible wrong path sends an agent off editing a
+directory nobody is serving.
+
+**No button?** Then the source isn't mounted, and no prompt will fix that. See below.
+
+### Turning it on
+
+| how you started it | live editing |
+| --- | --- |
+| `make up`, `make edit` | **on**, the mount is automatic |
+| `make edit` | on, and prints the host path on startup |
+| `docker run` as shown [above](#one-docker-run-no-clone) | **off**, no `/edit` mount |
+| `docker run` with the two flags below | on |
+
+`make up` runs a container just like `docker run` does; it just passes the mount for you. If
+you took the one-command route, add these and start it again:
 
 ```sh
-make edit           # the same as `make up`, then prints where the source landed
+-v "$HOME/.local/state/logedex/src:/edit" \
+-e EDIT_SRC_HOST="$HOME/.local/state/logedex/src"
 ```
 
-The source lands at `~/.local/state/logedex/src` by default. Save a `.js` file under
-`server/`, `shared/` or `agent/` and the server restarts itself in about a second, with
-open panes reconnecting on their own; save something under `server/public/` and the
-dashboard offers you a reload in the corner. If an edit doesn't parse, the server stays
-down until you fix it and the crash is in `.logedex/server.log`.
+Both matter. The first is the mount, the second is only so the dashboard can tell your
+agent the host path. With the mount but not the variable you still get a working panel, and
+a briefing with a blank where the path should be.
 
-Your edits survive restarts and image upgrades. The mount is the source of truth once
-seeded, and the startup log tells you when the image has diverged from it. To go back:
+Then `docker rm -f logedex`, run it again, and the button is there.
+
+### The two reload rules
+
+| you saved | what happens |
+| --- | --- |
+| `server/**`, `shared/**`, `agent/**` | the server restarts itself in about a second; open panes reconnect on their own |
+| `server/public/**` | nothing restarts; the dashboard offers a reload in the corner |
+
+If an edit doesn't parse, the server stays down until it's fixed, and the traceback is in
+`.logedex/server.log` inside the source directory. It recovers on its own once you save
+something that works.
+
+The `Dockerfile`, entrypoint and `Makefile` are deliberately **not** in the mount. They
+decide how the container is built and launched, so changing them means editing a checkout
+and rebuilding.
+
+### Keeping or discarding your edits
+
+Edits survive container restarts and image upgrades. The mount is the source of truth once
+seeded, and startup warns you when the image has drifted from it without overwriting
+anything. To throw them away:
 
 ```sh
 make up EDIT_RESET=1        # discard the edits, re-seed from the image
 ```
 
-The `Dockerfile`, entrypoint and `Makefile` are deliberately not in there, since changing
-them needs a rebuild anyway.
-
 [`AGENTS.md`](AGENTS.md) carries what reading the source won't tell you: boot order, the
 test command, and the isolate's missing globals (no `fetch`, no `fs`, no `Intl`) that make
 `agent/` unlike everything around it. [`CLAUDE.md`](CLAUDE.md) points at the same file, so
-either name works.
+either name works. Point your agent at it, or at the panel's briefing, which covers the
+same ground for the running deployment.
 
 <!-- <img src="assets/features/live-edit.gif" alt="Editing a file on the host and seeing the dashboard change" width="820"> -->
 
