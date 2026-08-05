@@ -55,9 +55,10 @@ identical, so give it something writing lines first. `make demo-stop` clears tho
 containers out.
 
 `make up` covers what would otherwise be flags. It builds the image, creates the state
-directory owned by you instead of root, names this box for the UI (inside a container
-`hostname` is the container id, which names the wrong thing), and reaches for
-`sudo docker` if you're not in the `docker` group.
+directory owned by you instead of root, passes this machine's `hostname -s` in as the
+box's label (inside a container `hostname` is the container id, which names the wrong
+thing), and reaches for `sudo docker` if you're not in the `docker` group. Rename the box
+later with `make up LOCAL_LABEL=web-01`.
 
 ### Have an agent run it
 
@@ -69,13 +70,28 @@ without a rebuild or a restart.
 git clone https://github.com/yeet-src/logedex.git && cd logedex
 ```
 
-Then point your coding agent at that directory and say:
+Open your agent in that directory and paste this:
 
-> Read AGENTS.md, then get this running with the demo containers attached.
+```text
+Get Logédex running on this machine and confirm it works.
 
-[`AGENTS.md`](AGENTS.md) is written for exactly this: the boot order, the module map, the
+1. Read AGENTS.md first. It has the boot order and the gotchas.
+2. Run `make demo` before `make up`. An empty dashboard looks identical to a
+   broken one, so there needs to be something writing log lines first.
+3. Verify with `curl localhost:8080/api/containers` and tell me whether the
+   three demo containers (web-01, api-02, worker-03) are listed. "The
+   container is up" is not the same as "it works".
+4. If anything fails, check `docker logs logedex` and the crash log named in
+   AGENTS.md before changing anything.
+
+This has to run on real Linux with a real Docker socket. If we're on a
+Docker Desktop or OrbStack VM, say so and stop: you'd be listing the VM's
+containers, not this host's.
+```
+
+That's the whole handoff. [`AGENTS.md`](AGENTS.md) carries the rest: the module map, the
 two reload loops, where a crash gets written, and the runtime constraints of the isolate
-that `agent/` runs in, which are not guessable from reading the source.
+that `agent/` runs in, which reading the source won't tell you.
 
 Why hand this over rather than do it by hand:
 

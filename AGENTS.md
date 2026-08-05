@@ -23,9 +23,23 @@ identical, so verifying your own work needs something writing lines. Those three
 containers do that (varied lines, a flood of `/health` to filter out, occasional real
 Python tracebacks). `make demo-stop` removes them.
 
-Then open `http://localhost:8080`, attach a demo container from the sidebar, and confirm
-you see lines arriving. If you don't, stop and read [Diagnosing](#diagnosing) rather than
-editing anything.
+Then verify, because "the container is up" and "it works" are different claims:
+
+```sh
+curl -s localhost:8080/healthz                    # {"ok":true,"hosts":1,...}
+curl -s localhost:8080/api/containers             # web-01, api-02, worker-03 listed?
+docker ps --filter name=logedex --format '{{.Status}}'   # want (healthy), not (health: starting)
+```
+
+The healthcheck has a 45s start period, so expect `(health: starting)` for the first
+minute; that alone is not a fault. If `/api/containers`
+comes back with an empty list or an error per host, stop and read
+[Diagnosing](#diagnosing) rather than editing anything.
+
+> **This has to be real Linux with a real Docker socket.** On Docker Desktop, OrbStack, or
+> any other VM-backed Docker, you'll list the *VM's* containers rather than the host's,
+> which looks like it works and answers the wrong question. Check `uname -s` before you
+> start, and say so instead of proceeding.
 
 `make edit` is `make up` plus a printout of where the running app's source landed on the
 host. That directory is where you work. See [The two loops](#the-two-loops).
