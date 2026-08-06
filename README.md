@@ -285,7 +285,7 @@ If two hosts' clocks disagree by more than two seconds, the pane says so
 by timestamp is only as good as the clocks behind it, and silently getting that wrong is
 worse than not offering the feature.
 
-<!-- <img src="assets/features/merge.gif" alt="Merging the same service from three hosts into one interleaved pane" width="820"> -->
+<img src="assets/log-merge.gif" alt="Merging the same service from three hosts into one interleaved pane" width="820">
 
 ### Two filter boxes
 
