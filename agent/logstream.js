@@ -1,6 +1,6 @@
 // One container's logs, streamed out of a yeet isolate as JSON lines.
 //
-//   yeet run agent/logstream.js -- --container <name> [--tail 200]
+//   yeet run agent/logstream.js -- --container <name> [--tail 200 | --tail 0]
 //                                  [--since <unix-sec>] [--until <unix-sec>]
 //                                  [--find "<query>"]
 //
@@ -35,7 +35,12 @@ import { subscribe } from "yeet:graph";
 import { matches, parseQuery } from "../shared/search.js";
 
 const container = String(yeet.args.container ?? yeet.args._?.[0] ?? "");
-const tail = String(yeet.args.tail ?? "200");
+/* Lines, not a string: `0` is a real value here (no bound) and has to survive the
+ * round trip from an argv that only carries text. An unusable value falls back to
+ * the default rather than to 0 — "I couldn't read your bound" must not resolve to
+ * "so I'll send everything". */
+const tailArg = Number(yeet.args.tail ?? 200);
+const tail = Number.isFinite(tailArg) && tailArg >= 0 ? Math.floor(tailArg) : 200;
 const since = Number(yeet.args.since) || 0;
 const until = Number(yeet.args.until) || 0;
 const follow = !until;
@@ -76,16 +81,39 @@ if (!container) {
  * backfills what the container wrote before we attached. Both output streams are
  * requested and labelled per line, so the viewer can tell stderr from stdout.
  *
- * `tail` is dropped once `since` is given: they're two different answers to "where
- * do I start", and docker applies tail LAST — so `tail: 200` over a window holding
- * 5000 lines silently hands back the final 200 of it, which reads as a broken time
- * filter rather than a line cap. */
+ * `tail` and `since` are applied TOGETHER, and that is a deliberate reversal.
+ *
+ * They used to be exclusive — two answers to "where do I start", so `since` won and
+ * `tail` was dropped — on the grounds that docker applies tail last, and handing back
+ * the final 200 lines of a 5,000-line window reads as a broken time filter. That
+ * reasoning holds for a tail the CALLER didn't choose. It doesn't hold when the tail
+ * is the caller's own buffer size, because then the lines it excludes are exactly the
+ * lines that would have been dropped on arrival: a 15-minute window on a busy
+ * container measured 76,843 lines delivered to fill a viewer holding 2,000, all of it
+ * read out of docker, serialised, streamed and parsed to be thrown away.
+ *
+ * Both bounds together mean: the newest `tail` lines that fall inside the window.
+ * `--tail 0` asks for no bound at all — the oldest-line probe in server/logs.js needs
+ * it, since it reads from the START of the log and a tail would hand it the end.
+ *
+ * EXCEPT with `until`, where docker will not combine them at all. Measured, on docker
+ * itself rather than through the graph:
+ *
+ *   docker logs --since S --until U web-01              → 284 lines
+ *   docker logs --since S --until U --tail 2000 web-01  →   0 lines
+ *
+ * The tail is taken from the end of the whole log, which for a closed window lies
+ * entirely after `until`, and the intersection is empty. So a closed window sends no
+ * tail: it is bounded at both ends by the operator's own choice, and there is no way
+ * to ask docker to bound it further. A wide one on a busy container is still every
+ * line of it — the width cap in shared/limits.js is all that stands behind that. */
 const opts = [
   `follow: ${follow}`,
   "stdout: true",
   "stderr: true",
   "timestamps: true",
-  ...(since ? [`since: ${since}`] : [`tail: ${JSON.stringify(tail)}`]),
+  ...(since ? [`since: ${since}`] : []),
+  ...(tail > 0 && !until ? [`tail: ${JSON.stringify(String(tail))}`] : []),
   ...(until ? [`until: ${until}`] : []),
 ].join(", ");
 
@@ -149,25 +177,42 @@ function emit(stream, raw) {
  * callback, and a docker_logs stream that has delivered its last line just goes
  * quiet. For a *following* stream that's correct and indefinite. For a closed
  * window it means the only evidence of "done" is the absence of further lines, so
- * we settle it on an idle timer: quiet for IDLE_MS, and the window is complete.
+ * we settle it on a timer: quiet for long enough, and the window is complete.
  *
- * It's a heuristic, and the failure mode is deliberately the harmless one — too
- * short and we'd declare a slow window finished early, so IDLE_MS is generous
- * relative to how fast docker replays history (thousands of lines a second). A
- * following stream never runs this, so an idle container is never mistaken for a
- * finished one. */
+ * Two deadlines, because silence before the first line and silence after it are not
+ * the same event.
+ *
+ * BEFORE the first line, docker has not started replaying yet. It is scanning a log
+ * from the beginning to find where the window starts, and how long that takes is a
+ * function of how much history sits in front of it — measured at 3.2s on a container
+ * with two days of logs, and it grows from there. A single 2s idle timer covered this
+ * whole period, so every closed window on a container of any age completed with
+ * `lines: 0` before docker had emitted anything: an empty pane that claimed the range
+ * was empty. FIRST_LINE_MS is the budget for that scan.
+ *
+ * AFTER the first line, docker is streaming and quiet genuinely means finished, so
+ * IDLE_MS stays short — it's the gap between consecutive lines of a replay running at
+ * thousands of lines a second.
+ *
+ * Both are heuristics, and both fail in the harmless direction: too generous means a
+ * finished window is declared finished late, never that a full one is declared empty.
+ * A following stream never runs any of this, so an idle container is never mistaken
+ * for a finished one. */
 const IDLE_MS = 2000;
+const FIRST_LINE_MS = 20000;
 let idle = null;
 
 function armCompletion() {
   if (follow) return;
   clearTimeout(idle);
+  // `seen`, not `lines`: a search that has matched nothing has still proved the
+  // stream is delivering, and is in the fast regime like any other.
   idle = setTimeout(() => {
     // `seen` matters when a search is on: "3 lines" over a closed window is very
     // different news depending on whether 3 or 30000 were examined to find them.
     console.log(JSON.stringify({ t: "complete", lines, seen }));
     setTimeout(() => yeet.exit(), 50); // same flush-before-exit race as die()
-  }, IDLE_MS);
+  }, seen ? IDLE_MS : FIRST_LINE_MS);
 }
 
 

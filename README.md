@@ -30,7 +30,7 @@ API: no agent protocol, no log shipper, no index, no eBPF.
 
 ## Have an agent set it up
 
-Paste this into a coding agent on the Linux box you want logs from. It clones the repo,
+Paste this into a coding agent on the box you want logs from. It clones the repo,
 brings the dashboard up with something logging into it, and tells you whether it worked.
 
 ```text
@@ -45,9 +45,8 @@ Verify with `curl localhost:8080/api/containers` and tell me whether web-01,
 api-02 and worker-03 are listed. "The container is up" is not the same as
 "it works".
 
-This needs real Linux and a real Docker socket. If this machine is Docker
-Desktop or OrbStack, stop and say so: you'd be listing the VM's containers
-instead of this host's.
+If this machine is Docker Desktop or OrbStack, run `make up NET=` instead of
+`make up`: host networking isn't real there, so the port needs publishing.
 ```
 
 Prefer to drive it yourself? [Manual install](#manual-install) is two commands.
@@ -74,35 +73,36 @@ box's label (inside a container `hostname` is the container id, which names the 
 thing), and reaches for `sudo docker` if you're not in the `docker` group. Rename the box
 later with `make up LOCAL_LABEL=web-01`.
 
-### The plain `docker run`
+### One `docker run`, no clone
 
-If you'd rather not use the Makefile:
+The published image is multi-arch (`linux/amd64`, `linux/arm64`), so this skips the clone
+and the build entirely:
 
 ```sh
-mkdir -p "$HOME/.local/state/logedex" "$HOME/.local/state/logedex/src"
-
-docker run -d --name logedex \
+docker run -d --name logedex --restart unless-stopped \
   --network host \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$HOME/.local/state/logedex:/data" \
-  -v "$HOME/.local/state/logedex/src:/edit" \
-  -e EDIT_SRC_HOST="$HOME/.local/state/logedex/src" \
   -e LOCAL_LABEL="$(hostname -s)" \
-  logedex
+  -e STATE_UID="$(id -u)" -e STATE_GID="$(id -g)" \
+  ghcr.io/yeet-src/logedex:latest
 ```
 
 A few notes on that command:
 
-- **Create the directories first.** The server runs as root inside the container, so
-  anything it writes into a mount it created lands root-owned and you can't edit it.
-  A directory that already exists arrives owned by you. (Or pass
-  `-e STATE_UID="$(id -u)" -e STATE_GID="$(id -g)"` and it works that out instead.)
-- **`--network host` and `LOCAL_LABEL`** are what make a multi-host list work. Both are
-  explained under [Running a fleet](#running-a-fleet); on one box you can leave them alone.
 - **`/data`** is where the host list and alert rules are persisted. Mount something there
   or they go away with the container.
-- **`/edit`** is the app's own source, which the container serves out of. See
-  [Live editing](#live-editing).
+- **`STATE_UID`/`STATE_GID`** are what keep this to one command. The server runs as root
+  inside the container, so a mount directory it creates lands root-owned and you can't
+  touch `hosts.json`; passing your ids has it chown them instead. (Creating the directory
+  yourself first does the same thing.)
+- **`--network host` and `LOCAL_LABEL`** are what make a multi-host list work. Both are
+  explained under [Running a fleet](#running-a-fleet); on one box you can leave them alone.
+- **Live editing is off** in this form. Add
+  `-v "$HOME/.local/state/logedex/src:/edit" -e EDIT_SRC_HOST="$HOME/.local/state/logedex/src"`
+  to serve the app out of a directory on your machine — see [Live editing](#live-editing).
+- **Built it yourself?** Swap the last line for `logedex`. `make push` is what publishes
+  the multi-arch tag.
 
 **The Docker socket is the only grant it needs** — no `--privileged`, no BPF
 capabilities, no host PID namespace. That socket is also the whole security story: the
@@ -111,24 +111,6 @@ put the port on the public internet without something in front of it.
 
 Other targets: `make down`, `make logs`, `make dev` (run from a checkout with
 `node --watch`, no container), `make demo` / `make demo-stop`.
-
-### Pull instead of build
-
-`make push` publishes a multi-arch image to `ghcr.io/yeet-src/logedex`, which skips the
-clone and the build entirely:
-
-```sh
-docker run -d --name logedex --network host \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$HOME/.local/state/logedex:/data" \
-  -e LOCAL_LABEL="$(hostname -s)" \
-  ghcr.io/yeet-src/logedex:latest
-```
-
-> [!NOTE]
-> An anonymous pull of that image currently returns `401`, so it is either unpublished
-> or still private. A package GHCR creates is private until someone changes it at
-> `github.com/orgs/yeet-src/packages`. Until that's done, clone and `make up`.
 
 ## Running a fleet
 
@@ -202,8 +184,8 @@ either name works.
 
 ## Features
 
-<!-- Feature clips go in assets/features/<name>.gif. See AGENTS.md for the naming
-     convention and the capture checklist. Uncomment each <img> as its clip lands. -->
+<!-- Feature clips live in assets/<name>.gif. See AGENTS.md for the capture checklist.
+     Uncomment the remaining <img> tags as their clips land. -->
 
 ### A host list you type into
 
@@ -211,7 +193,7 @@ A LAN name or a public URL, kept in a JSON file across restarts. Each box is ask
 it calls itself, so a row reads `web-02` rather than `box-two.lan:8080`. Reachability is
 your problem: no discovery, no tunnel, no registration.
 
-<!-- <img src="assets/features/hosts.gif" alt="Adding a host by URL and seeing its containers appear" width="820"> -->
+<img src="assets/add_host.gif" alt="Adding a host by URL and seeing its containers appear" width="820">
 
 ### Containers per host, running or stopped
 
@@ -219,7 +201,7 @@ Hosts collapse to a line with a count, one box narrows every host at once (type,
 `↑`/`↓`, `Enter` to attach), and the sidebar folds to a rail (`«`, or ctrl+B) when the
 logs want the width.
 
-<!-- <img src="assets/features/sidebar.gif" alt="Filtering the container list across every host and attaching one" width="820"> -->
+<img src="assets/containers_per_host.gif" alt="Filtering the container list across every host and attaching one" width="320">
 
 ### Log panes, side by side
 
@@ -228,7 +210,16 @@ container is preserved, timestamps are docker's, and a stopped container replays
 wrote then says `ended`. Drag the seam between panes to resize (arrow keys work too);
 double-click to even them out.
 
-<!-- <img src="assets/features/panes.gif" alt="Four panes from three hosts, resized by dragging the seam" width="820"> -->
+<img src="assets/logs_side_by_side.gif" alt="Four panes from three hosts, resized by dragging the seam" width="820">
+
+### Scroll back for more
+
+A pane loads the newest 2000 lines of its window and fetches the stretch before them
+when you scroll to the top, so a six-hour range doesn't have to choose which two
+thousand of it you get. Pages are time slices sized from the density already on screen,
+because docker has no "newest N before this moment" to ask for.
+
+<!-- <img src="assets/features/paging.gif" alt="Scrolling up in a pane to load older lines" width="820"> -->
 
 ### One time range across every pane
 
@@ -236,15 +227,7 @@ double-click to even them out.
 together. This is the feature the whole layout exists for: lining up one five-second
 window across six containers is a single drag rather than six.
 
-<!-- <img src="assets/features/timerange.gif" alt="Every pane jumping to the same window at once" width="820"> -->
-
-### A scrubber spanning the history you actually have
-
-Its left edge is the oldest line the open panes can reach, **measured rather than
-guessed** (`/api/oldest` asks each host). Drag the handles to pick a window; the right
-handle at the end means keep following.
-
-<!-- <img src="assets/features/scrubber.gif" alt="Dragging the scrubber handles to pick a window" width="820"> -->
+<img src="assets/time_range.gif" alt="Every pane jumping to the same window at once" width="820">
 
 ### Combined panes
 
@@ -273,7 +256,7 @@ backtracking pattern there doesn't just fail slowly, it can wedge the daemon for
 script on that box. Substring terms cost the same on every input, so the worst a query
 can do is match nothing.
 
-<!-- <img src="assets/features/filters.gif" alt="Typing in the keep and hide boxes, with every pane narrowing live" width="820"> -->
+<img src="assets/filter.gif" alt="Typing in the keep and hide boxes, with every pane narrowing live" width="820">
 
 ### Alerts to Slack
 
@@ -289,7 +272,7 @@ doesn't come back inside the budget. You cannot time a regex on the thread you c
 (there's no step limit and no interrupt in JS regex), so the canary runs somewhere
 killable. Costs about 30ms per save.
 
-<!-- <img src="assets/features/alerts.gif" alt="Creating an alert rule and receiving it in Slack" width="820"> -->
+<img src="assets/alerts.gif" alt="Creating an alert rule and receiving it in Slack" width="820">
 
 ### Two themes
 
@@ -307,7 +290,7 @@ in and it offers a **sign in with yeet** button that drives the ordinary device 
 For a deployment, skip the click:
 
 ```sh
-make up YEET_AUTH_KEY=...       # or REQUIRE_LOGIN=0 to drop the gate entirely
+make up YEET_AUTH_KEY=...
 ```
 
 Only the box you point a browser at needs to be signed in; the ones it fans out to can
@@ -327,6 +310,7 @@ auth.
 | `ALERTS_FILE` | `/data/alerts.json`  | where alert rules are persisted (`""` disables persistence)         |
 | `TAIL`        | `500`                | log lines buffered per container, to backfill a new viewer          |
 | `MAX_WINDOW`  | `86400`              | widest history one request may replay, in seconds (`0` = no cap)    |
+| `MAX_LINES`   | `2000`               | most lines one request may replay — the newest that many in its window |
 | `REQUIRE_LOGIN` | `1`                | dashboard asks for a yeet login; `0` turns the gate off              |
 | `YEET_AUTH_KEY` | —                  | register the host non-interactively, so the gate is already satisfied |
 | `EDIT_DIR`    | `/edit`              | where the app runs from *inside* the container                       |
@@ -348,8 +332,11 @@ Linux, Docker, and yeetd on each host (the image installs its own). The graph's
 pane also backfills history from docker itself. Hosts in one list don't have to agree on
 a version, since each answers for itself.
 
-Not macOS/Windows Docker Desktop as a *target*: that's a VM, so you'd be listing the VM's
-containers. It's fine as the browser you view from.
+macOS and Windows work through Docker Desktop or OrbStack. Docker runs in a Linux VM
+there, but the socket you mount is the same daemon your `docker ps` talks to, so the
+containers listed are the ones you actually run. One flag changes: host networking isn't
+real on those platforms, so bring it up with `make up NET=`, which puts the container on
+a bridge and publishes the port.
 
 ## FAQs
 
@@ -365,9 +352,12 @@ capabilities, no host PID namespace, no BTF mount. Note that the socket is itsel
 root-equivalent on the host, so "unprivileged container" is not the same as "harmless".
 
 **Why can't I find a line I know exists?**
-Almost always the 2000-line pane cap or the time range. A pane holds the last 2000 lines
-of the window you selected, and the filters run over those lines rather than over your
-logs. Narrow the range and the same query reaches further back.
+Usually the time range, or you haven't scrolled back to it yet. A pane loads the newest
+2000 lines of the window you selected — and asks for only those, so a wide window on a
+busy container isn't replayed in full — then fetches the stretch before them when you
+scroll to the top. The filters run over the lines currently loaded rather than over your
+whole log, so scroll back to the period you mean, or narrow the range and the same query
+reaches further in one go.
 
 **Is it safe to put this on the internet?**
 Not as-is. The login gate covers the UI only, `/api/*` answers without it, and the

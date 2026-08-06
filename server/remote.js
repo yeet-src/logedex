@@ -77,7 +77,8 @@ export async function remoteOldest(host, container, { timeoutMs = 10_000 } = {})
  *
  * @param {object} host
  * @param {string} container
- * @param {{since?:number, until?:number, find?:string}} win  window + query, forwarded as-is
+ * @param {{since?:number, until?:number, find?:string, limit?:number}} win  window, query and
+ *   line bound, forwarded as-is
  * @param {(evt:object)=>void} onEvent
  */
 export function remoteLogs(host, container, win, onEvent) {
@@ -94,6 +95,11 @@ export function remoteLogs(host, container, win, onEvent) {
     if (win?.since) q.set("since", String(win.since));
     if (win?.until) q.set("until", String(win.until));
     if (win?.find) q.set("find", String(win.find));
+    // The line bound travels with the window for the same reason the window does:
+    // the remote applies it in its own subscription, so the lines it excludes are
+    // never read out of its docker daemon and never cross the network. A relay that
+    // trimmed on arrival would have paid the whole cost already.
+    if (win?.limit) q.set("limit", String(win.limit));
     const url = `${host.url}/api/local/logs?${q}`;
     let res;
     try {

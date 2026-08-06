@@ -36,7 +36,7 @@ import { createLogs } from "./logs.js";
 import { createAuth } from "./auth.js";
 import { createAlerts } from "./alerts.js";
 import { remoteContainers, remoteLabel, remoteLogs, remoteOldest } from "./remote.js";
-import { DEFAULT_MAX_WINDOW_SEC } from "../shared/limits.js";
+import { clampLimit, DEFAULT_MAX_LINES, DEFAULT_MAX_WINDOW_SEC } from "../shared/limits.js";
 import { assetFrom, MIME, PUBLIC, SHARED, SPRITE_DIR, SPRITE_EXT, spriteFrom } from "./assets.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,6 +102,15 @@ const config = {
   maxWindowSec: Number.isFinite(Number(process.env.MAX_WINDOW)) && process.env.MAX_WINDOW
     ? Math.max(0, Number(process.env.MAX_WINDOW))
     : DEFAULT_MAX_WINDOW_SEC,
+  /* The other half of that bound: the most lines one stream may ask this host to
+   * replay out of docker, whatever window it named. The width cap says how far back
+   * a question may reach; this says how much answer it may pull, which on a busy
+   * container is the number that actually matters. A viewer asks for its own buffer
+   * size and gets the newest that many inside its window; anything larger, or
+   * missing, lands here. See shared/limits.js. */
+  maxLines: Number.isFinite(Number(process.env.MAX_LINES)) && process.env.MAX_LINES
+    ? Math.max(1, Number(process.env.MAX_LINES))
+    : DEFAULT_MAX_LINES,
   /* The dashboard is gated on this yeet instance being logged in. Only the box you
    * point a browser at needs to be — the ones it fans out to are reached over their
    * own API, which this doesn't cover. REQUIRE_LOGIN=0 turns the gate off, for a
@@ -174,6 +183,7 @@ const logs = createLogs({
   userSocket: config.userSocket,
   tail: config.tail,
   maxWindowSec: config.maxWindowSec,
+  maxLines: config.maxLines,
 });
 /* Alerting. It reaches logs and remotes through the same two functions the HTTP handlers use, so
  * a rule on a local container shares the very stream a viewer would open — attaching as a
@@ -217,6 +227,12 @@ function windowFrom(params) {
   if (win.since && win.until && win.until <= win.since) {
     return { error: "until must be after since" };
   }
+  /* How many lines the caller can hold. Unlike the timestamps this is not rejected
+   * when it's nonsense — it's a hint about the CALLER's capacity, not a statement
+   * about what to show, so an unreadable one falls back to this host's own ceiling
+   * rather than failing a request that is otherwise perfectly well formed. */
+  const limit = params.get("limit");
+  if (limit !== null && limit !== "") win.limit = clampLimit(limit, config.maxLines);
   return win;
 }
 
@@ -346,7 +362,7 @@ async function handleContainers(res) {
   // The hub's window cap rides along: the browser polls this every few seconds
   // anyway, and it needs the real configured value rather than the shared default
   // so the range it offers matches the range it will actually be served.
-  json(res, 200, { ok: true, hosts: results, maxWindowSec: config.maxWindowSec });
+  json(res, 200, { ok: true, hosts: results, maxWindowSec: config.maxWindowSec, maxLines: config.maxLines });
 }
 
 /** SSE for one (host, container). Local hosts read the daemon directly; remote

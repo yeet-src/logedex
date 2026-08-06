@@ -13,11 +13,11 @@
 // same pane with one member, which keeps the range handling and lifecycle in one
 // place instead of two.
 
-import { blockCross, clockSpread, localTime, memberLabels, mergeCandidates, mergeWatermark, posToTime, pushWithin, splitAtWatermark, timeToPos, tsKey, zoneLabel } from "/order.js";
+import { blockCross, clockSpread, localTime, memberLabels, mergeCandidates, mergePage, mergeWatermark, pageSpan, posToTime, pushWithin, splitAtWatermark, timeToPos, tsKey, zoneLabel } from "/order.js";
 import { buildQuery, matchRanges, matches, parseQuery } from "/search.js";
 import { entryOf, newEntryState } from "/entries.js";
 import { parseAnsi } from "/ansi.js";
-import { clampWindow, DEFAULT_MAX_WINDOW_SEC, describeCap } from "/limits.js";
+import { clampWindow, DEFAULT_MAX_LINES, DEFAULT_MAX_WINDOW_SEC, describeCap } from "/limits.js";
 import { compileGuarded, CONTEXT_MAX, PATTERN_MAX } from "/alertrule.js";
 import { setupEdit } from "/edit.js";
 import { setupTheme } from "/theme.js";
@@ -130,7 +130,12 @@ function pokeball(size = 38) {
   return icon;
 }
 
-const MAX_LINES = 2000;      // per pane, so a chatty container can't eat the tab
+/* Per pane, so a chatty container can't eat the tab — and, because it travels with
+ * every windowed request as `limit`, also the number of lines a host will read out of
+ * docker to answer one. Shared rather than local so those two can't drift: a pane that
+ * asked for more than it can hold would be back to dropping lines on arrival, and one
+ * that asked for less would show less than it could. */
+const MAX_LINES = DEFAULT_MAX_LINES;
 const REFRESH_MS = 5000;     // how often the container lists are re-polled
 const FLUSH_MS = 100;        // merged panes: how often the settled lines are emitted
 
@@ -171,7 +176,6 @@ const memberKey = (hostId, container) => `${hostId}|${container}`;
 const paneKeyFor = (members) => members.map((m) => memberKey(m.hostId, m.container)).sort().join("+");
 
 let hostRows = [];   // last /api/containers response
-let hintTimer = null;
 
 /* The global time range, in the three forms the server takes:
  *   {}                       live tail
@@ -205,12 +209,54 @@ let search = { text: "", exclude: "", query: buildQuery("", "") };
 /** Should the browser hide lines that don't match? */
 const hidingLocally = () => !search.query.empty;
 
+/* Transient messages, bottom right.
+ *
+ * These used to be one line of text wedged into the top bar between the host form and
+ * the theme button, which had two problems. It was somewhere nobody was looking — the
+ * answer to "did that delete work" appeared at the opposite end of the window from the
+ * button that was clicked — and being a single slot, each message wiped the one before
+ * it, so a burst (three hosts failing a refresh, a delete plus its reload) showed only
+ * whichever landed last.
+ *
+ * A stack in the corner fixes both: near where the eye already is for pane-level work,
+ * and several can be true at once. The signature is unchanged, so all 21 call sites
+ * carry on saying what they said.
+ */
+const TOAST_MS = 6000;
+/* Past this many, the oldest goes to make room. A stack tall enough to reach the top
+ * of the window stops being a notification and starts being a wall — and by then the
+ * older ones are describing something several actions ago. */
+const TOAST_MAX = 4;
+
 function hint(msg, kind = "") {
-  const n = $("#hint");
-  n.textContent = msg;
-  n.dataset.kind = kind;
-  clearTimeout(hintTimer);
-  if (msg) hintTimer = setTimeout(() => { n.textContent = ""; n.dataset.kind = ""; }, 6000);
+  if (!msg) return;
+  const box = $("#toasts");
+  if (!box) return;
+
+  const toast = el("div", "toast");
+  if (kind) toast.dataset.kind = kind;
+  toast.append(el("span", "toast-msg", String(msg)));
+  // Dismissable, because six seconds is a long time to sit over a log line you're
+  // reading, and a message you've already acted on is just in the way.
+  toast.title = "click to dismiss";
+
+  let done = false;
+  const drop = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    /* Faded out rather than removed outright, and the class is what the stylesheet
+     * animates — so a reduced-motion preference is honoured by the CSS rather than
+     * being second-guessed here. `transitionend` would never fire if the transition is
+     * disabled, so the removal is on a timer either way. */
+    toast.classList.add("out");
+    setTimeout(() => toast.remove(), 200);
+  };
+  toast.addEventListener("click", drop);
+  const timer = setTimeout(drop, TOAST_MS);
+
+  box.append(toast);
+  while (box.children.length > TOAST_MAX) box.firstElementChild?.remove();
 }
 
 // ── host list ───────────────────────────────────────────────────────────────
@@ -780,6 +826,99 @@ function rulesFor(targets) {
     (r.targets ?? []).some((t) => keys.has(`${t.hostId}\x00${t.container}`)));
 }
 
+/* Every rule on this box, from the top bar.
+ *
+ * The pane bell is where a rule is written, because it knows which streams you are
+ * looking at and can pre-fill them. It's the wrong place to FIND one: a rule outlives
+ * the pane it was created from, and the pane it was created from may not be open — so
+ * turning an alert off meant remembering which container you wrote it against, opening
+ * that pane, and going through its bell. An alert you can't find is an alert you can't
+ * turn off, which is the failure that matters at 3am.
+ *
+ * The same rows as the pane picker, deliberately: same badges, same test button, same
+ * delete. Only the filter differs (none) and the form is absent — writing a rule needs
+ * a target, and the top bar isn't looking at one. */
+function openAlertList(anchor) {
+  closePicker();
+  const box = el("div", "picker alerts-list");
+  document.body.append(box);
+  picker = box;
+
+  const ctx = {};
+  ctx.redraw = () => { renderAlertList(box, anchor, ctx); position(box, anchor); };
+
+  box.append(el("div", "picker-head", "alert rules"));
+  box.append(el("div", "picker-note", "checking…"));
+  position(box, anchor);
+
+  loadAlerts().then(ctx.redraw, (err) => {
+    box.textContent = "";
+    box.append(el("div", "picker-head", "alert rules"));
+    box.append(el("div", "picker-note bad", String(err.message)));
+    position(box, anchor);
+  });
+}
+
+function renderAlertList(box, anchor, ctx) {
+  box.textContent = "";
+  const rules = alertsCache?.alerts ?? [];
+  box.append(el("div", "picker-head", `alert rules · ${rules.length || "none"}`));
+
+  if (rules.length === 0) {
+    // Says where they come from, because an empty list is otherwise indistinguishable
+    // from a broken one, and the bell that creates them is in a place you have to know.
+    box.append(el("div", "picker-note",
+      "No alert rules. The bell in a pane's header creates one on the streams in it."));
+    return;
+  }
+
+  const caps = alertsCache?.caps ?? {};
+  // Rules exist and have nowhere to go — worth saying here even though this list can't
+  // fix it, since a rule that has silently never delivered looks exactly like one that
+  // has simply never matched.
+  if (caps.slack === false) {
+    box.append(el("div", "picker-note bad",
+      "Slack isn't connected to this yeet account, so none of these can deliver."));
+  }
+
+  const list = el("div", "picker-list");
+  /* Newest first. A rule's age is the best proxy for "the one I just made and want to
+   * get rid of", which is what brings most people here. */
+  for (const rule of [...rules].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))) {
+    list.append(alertRow(rule, box, anchor, ctx));
+  }
+  box.append(list);
+}
+
+/** The bell in the top bar, and the count on it. Hidden count when there are none, so
+ *  the button is quiet on a dashboard nobody has armed anything on. */
+function paintAlertsButton() {
+  const btn = $("#alerts-btn");
+  if (!btn) return;
+  const n = alertsCache?.alerts?.length ?? 0;
+  btn.textContent = "";
+  btn.append(alertIcon());
+  if (n > 0) btn.append(el("span", "alerts-count", String(n)));
+  btn.title = n === 0
+    ? "alert rules — none yet"
+    : `${n} alert rule${n === 1 ? "" : "s"} on this box`;
+}
+
+/** Wire the top-bar bell. The count needs one load to be true, so it asks once at
+ *  startup and then keeps itself current off every change made through a picker. */
+function setupAlertsButton() {
+  const btn = $("#alerts-btn");
+  if (!btn) return;
+  paintAlertsButton();
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();          // the document handler that closes pickers
+    if (picker?.classList.contains("alerts-list")) return closePicker();
+    openAlertList(btn);
+    track("alert_list_opened", { rules: alertsCache?.alerts?.length ?? 0 });
+  });
+  loadAlerts().then(paintAlertsButton, () => { /* the picker reports it when opened */ });
+}
+
 function openAlertPicker(anchor, pane) {
   closePicker();
   const box = el("div", "picker");
@@ -789,7 +928,9 @@ function openAlertPicker(anchor, pane) {
   const targets = pane.members.map((m) => ({ hostId: m.hostId, container: m.container }));
   const label = pane.merged ? `these ${pane.members.length} streams` : pane.members[0].container;
 
-  const draw = () => { renderAlerts(box, anchor, { targets, label, pane }); position(box, anchor); };
+  const ctx = { targets, label, pane };
+  ctx.redraw = () => { renderAlerts(box, anchor, ctx); position(box, anchor); };
+  const draw = ctx.redraw;
 
   box.append(el("div", "picker-head", `alerts on ${label}`));
   box.append(el("div", "picker-note", "checking…"));
@@ -902,8 +1043,10 @@ function alertRow(rule, box, anchor, ctx) {
     alertsCache.alerts = body.alerts;
     track("alert_rule_deleted", { targets: rule.targets?.length ?? 0, fired_count: rule.firedCount ?? 0 });
     hint(`deleted "${rule.name}"`);
-    renderAlerts(box, anchor, ctx);
-    position(box, anchor);
+    paintAlertsButton();
+    // Whose list this row is in decides how it's redrawn — a pane's picker rebuilds
+    // itself around its form, the global one is just the list.
+    ctx.redraw();
   });
   row.append(del);
   return row;
@@ -1075,6 +1218,7 @@ function attach(members, { via = "sidebar" } = {}) {
     key, node, body: null, members: [], count: 0, merged,
     pending: [], flushTimer: null, raf: null, arrival: 0, lastKey: "", emittedKey: "",
     stateEl: null, skewEl: null, cappedEl: null, ballEl: null, loading: false, loadingEl: null, loadingTimer: null, graceTimer: null,
+    olderEl: null, older: newPageState(),
   };
 
   if (merged) {
@@ -1184,7 +1328,16 @@ function attach(members, { via = "sidebar" } = {}) {
   pane.body = body;
   pane.loadingEl = buildSkeleton(merged);
   pane.loadingTimer = null;
-  view.append(body, pane.loadingEl);
+  /* Outside the body on purpose. `appendLine`, the line trim and `repaint` all walk
+   * `pane.body.children` and would count anything living in there as a line — which is
+   * the same reason the skeleton sits out here. */
+  const older = el("button", "pane-older");
+  older.type = "button";
+  older.hidden = true;
+  older.addEventListener("click", () => loadOlder(pane, { via: "button" }));
+  pane.olderEl = older;
+  body.addEventListener("scroll", () => onPaneScroll(pane), { passive: true });
+  view.append(older, body, pane.loadingEl);
   node.append(head, view);
   $("#panes").append(node);
   $("#panes").querySelector(".empty")?.remove();
@@ -1376,6 +1529,9 @@ function showLoading(pane) {
 function hideLoading(pane) {
   if (!pane.loading) return;
   pane.loading = false;
+  // First lines are on screen, so there is now a top to scroll to and something
+  // behind it. Until this point there was nothing for the bar to say.
+  paintOlderBar(pane);
   pane.loadingEl.classList.add("out");
   clearTimeout(pane.graceTimer);
   pane.graceTimer = null;
@@ -1403,6 +1559,9 @@ function openStreams(pane) {
   pane.emittedKey = "";
   pane.skewEl.hidden = true;
   pane.cappedEl.hidden = true;
+  // Every page belonged to the old window; a new one starts from its own newest lines.
+  pane.older = newPageState();
+  if (pane.olderEl) pane.olderEl.hidden = true;
   showLoading(pane);
 
   pane.stateEl.dataset.state = "starting";
@@ -1424,6 +1583,15 @@ function openStreams(pane) {
     const q = new URLSearchParams({ host: m.hostId, container: m.container });
     if (range.since) q.set("since", String(range.since));
     if (range.until) q.set("until", String(range.until));
+    /* What this pane can hold, so the host sends the newest that many lines inside the
+     * window instead of all of them. Only with a window: a plain live tail has no
+     * history to bound, and the host's own tail is the right size for the catch-up.
+     *
+     * This is the fix for the thing that made a 15-minute range feel broken. The
+     * window resolves to a fixed `since` and then follows, so a pane left open for
+     * seven hours is a seven-hour window — and every reconnect replayed all of it,
+     * 76,843 lines measured, to display the 2,000 at the end. */
+    if (range.since) q.set("limit", String(MAX_LINES));
     // No `find` goes on the wire: the filter runs here, over the lines already
     // loaded. The endpoint still accepts one — see the note by `search`.
 
@@ -1705,6 +1873,9 @@ function reportCapped(pane) {
     + (which ? ` (${which})` : "");
 }
 
+/** Thousands separators, so `36412` doesn't read as `3641` at a glance. */
+const fmtCount = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
 /** Re-decide one entry after a line joined it. The line that makes a traceback match
  *  is usually its last — the `TimeoutError:` terminator — so an entry that was hidden
  *  while it was only a header has to be able to change its mind.
@@ -1809,14 +1980,246 @@ function placeLine(pane, line, key) {
   else pane.body.prepend(line);
 }
 
-function appendLine(pane, member, evt, { batched = false, key = null } = {}) {
-  // The first line of a window is the moment the skeleton has served its purpose.
-  if (pane.loading) hideLoading(pane);
-  // Only autoscroll if the reader is already at the bottom — scrolling up to
-  // read something shouldn't get yanked away by the next line. In a batch the
-  // caller does this once, around the whole batch.
-  const atBottom = batched ? false : nearBottom(pane.body);
+/* ── paging backwards ────────────────────────────────────────────────────────
+ *
+ * Scroll to the top of a pane and it fetches the stretch of log before what it holds.
+ *
+ * This is the answer to the thing that made wide windows useless. A pane holds
+ * MAX_LINES rows, and a window wider than that many lines of output can only ever show
+ * part of itself — on a container writing two lines a second, every preset from 15m up
+ * resolved to the same newest ~13 minutes. Rather than choosing which 2,000 lines of
+ * six hours to keep, the pane keeps the newest and goes back for the rest when someone
+ * actually scrolls there. Nothing is dropped, and nothing is fetched until it's wanted.
+ *
+ * A page is a TIME SLICE, not a line count, because docker has no "newest N before T":
+ * `tail` is applied ahead of `until` and the two together return nothing (measured —
+ * see agent/logstream.js). So `pageSpan` in order.js estimates how far back to reach
+ * from the density already on screen, each page correcting the last guess. A page is
+ * therefore approximately, not exactly, PAGE_TARGET lines.
+ *
+ * The request is an ordinary closed window on the endpoint that already exists, which
+ * is why none of this needed a server change: `since`+`until` loads, completes, and
+ * ends. It goes to the same routes a pane's live stream uses, so a page from a remote
+ * host is fetched by that host in its own subscription exactly as a live stream is.
+ *
+ * Two things follow from prepending to a live pane, and both are handled below:
+ * the buffer trim must not eat the history the moment it arrives (`trimGuard`), and
+ * the scroll position has to be held still, or loading older lines would throw the
+ * reader somewhere else on the page. */
+const PAGE_TARGET = 1000;        // lines we aim to fetch per page
+const PAGE_TRIGGER_PX = 240;     // how near the top starts the next one
+const PAGE_TIMEOUT_MS = 30_000;  // a page that never completes must not wedge the pane
+/* The ceiling on a paged-up pane, well above MAX_LINES because the whole point is to
+ * hold more than a live pane does. Reached, paging stops rather than dropping what's
+ * already been read — the alternative is a scrollback that silently eats its own top
+ * while you read down it. */
+const MAX_ROWS = 20_000;
+/* Consecutive empty pages before a pane stops offering to look further back. Three,
+ * each reaching four times further than the last, so the last attempt covers well over
+ * an hour of silence before "start of this log" is claimed. */
+const EMPTY_MAX = 3;
 
+/** Fresh paging state. A window change invalidates every page, so this is reset with
+ *  the rest of the pane in `openStreams`. */
+function newPageState() {
+  return { loading: false, exhausted: false, pages: 0, error: null, full: false, empty: 0 };
+}
+
+/** The oldest and newest sort keys currently in the body, and how many rows there are
+ *  — everything `pageSpan` needs to size the next reach, read once. */
+function bodySpan(pane) {
+  const rows = pane.body.children;
+  if (rows.length === 0) return null;
+  const first = rows[0].dataset.key;
+  const last = rows[rows.length - 1].dataset.key;
+  if (!first || !last) return null;
+  const from = Date.parse(`${first}Z`);
+  const to = Date.parse(`${last}Z`);
+  if (Number.isNaN(from) || Number.isNaN(to)) return null;
+  return { fromSec: Math.floor(from / 1000), toSec: Math.floor(to / 1000), rows: rows.length };
+}
+
+/**
+ * Fetch one member's slice of a page: a closed window, read to completion.
+ *
+ * Resolves with the lines in the order the host sent them — its own order, which for a
+ * single container is the order they were written. The merge across members happens
+ * once all of them are in (`mergePage`), which a page can do and the live path cannot,
+ * because a finished page is not waiting on anything.
+ */
+function fetchSlice(member, since, until) {
+  return new Promise((resolve) => {
+    const q = new URLSearchParams({
+      host: member.hostId, container: member.container,
+      since: String(since), until: String(until),
+    });
+    const es = new EventSource(`/api/logs?${q}`);
+    const lines = [];
+    let settled = false;
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      es.close();
+      resolve({ lines, error });
+    };
+    // A closed window ends by saying so; the server holds the connection open after
+    // that (it has no reason to close it), so this is what ends the read.
+    const timer = setTimeout(() => finish("timed out"), PAGE_TIMEOUT_MS);
+    es.onmessage = (ev) => {
+      let evt;
+      try { evt = JSON.parse(ev.data); } catch { return; }
+      if (evt.t === "log") return void lines.push(evt);
+      if (evt.t !== "status") return;
+      if (evt.state === "complete" || evt.state === "ended") finish();
+      else if (evt.state === "error") finish(evt.error || "stream failed");
+    };
+    // EventSource retries by itself, which for a finite window would re-read the whole
+    // slice into a list that already holds it. One attempt, then give up.
+    es.onerror = () => finish("could not reach that host");
+  });
+}
+
+/** Load the stretch of log immediately before what a pane holds, and put it on top. */
+async function loadOlder(pane, { via = "scroll" } = {}) {
+  const st = pane.older;
+  if (!st || st.loading || st.exhausted || st.full) return;
+  const span = bodySpan(pane);
+  if (!span) return;                       // nothing loaded yet; nothing to page from
+  if (pane.body.children.length >= MAX_ROWS) {
+    st.full = true;
+    return void paintOlderBar(pane);
+  }
+
+  st.loading = true;
+  st.error = null;
+  paintOlderBar(pane);
+
+  const until = span.fromSec;              // the oldest line we hold is the new edge
+  /* Each consecutive empty page reaches four times further than the last.
+   *
+   * The estimate is built from the density of what's on screen, which says nothing
+   * about a container that was idle before it. Without this, scrolling back past a
+   * quiet night would be one request per estimated-minute of silence, all of them
+   * empty, none of them getting anywhere. */
+  const delta = pageSpan(span.toSec - span.fromSec, span.rows, PAGE_TARGET) * (4 ** st.empty);
+  /* Never reach back past the window the pane is showing. The range control is a
+   * statement about what this pane is, and quietly loading lines from before it when
+   * someone scrolls up would make the pane disagree with the control above it. Hitting
+   * that edge is not an error — it's the start of the window, and the bar says so. */
+  const floor = range.since ?? 0;
+  const since = Math.max(floor, until - delta);
+  if (since >= until) {
+    st.exhausted = true;
+    st.loading = false;
+    return void paintOlderBar(pane);
+  }
+
+  const slices = await Promise.all(pane.members.map((m) => fetchSlice(m, since, until)));
+
+  /* Entry grouping runs per member over the page's own lines, in the member's own
+   * order — the same rule the live path uses, for the same reason (a merged pane's
+   * screen order is not any one container's order). The state is fresh per page, so a
+   * traceback straddling the seam between two pages groups as two entries rather than
+   * one. Visible only as a filter judging the halves separately, and the alternative is
+   * carrying grouping state backwards across fetches that may never happen. */
+  const items = [];
+  slices.forEach((slice, memberIdx) => {
+    const member = pane.members[memberIdx];
+    const entries = newEntryState();
+    slice.lines.forEach((evt, seq) => {
+      const painted = parseAnsi(evt.message);
+      evt.message = painted.text;
+      evt.runs = painted.runs;
+      evt.entry = `${memberKey(member.hostId, member.container)}#p${st.pages}:${entryOf(entries, evt.message)}`;
+      items.push({ key: tsKey(evt.ts) ?? "", member: memberIdx, seq, evt });
+    });
+  });
+
+  const failed = slices.filter((s) => s.error);
+  st.error = failed.length && items.length === 0 ? failed[0].error : null;
+
+  if (items.length > 0) {
+    const frag = document.createDocumentFragment();
+    for (const item of mergePage(items)) {
+      const line = renderLine(pane, pane.members[item.member], item.evt);
+      if (item.key) line.dataset.key = item.key;
+      frag.append(line);
+    }
+    /* Hold the reader still. Prepending moves every row down by the height of what was
+     * added, so without this the page they were reading leaves the viewport — the one
+     * thing a "load more where I am" gesture must not do. Measured against the distance
+     * from the BOTTOM, which prepending doesn't change, rather than against scrollTop,
+     * which it does. */
+    const fromBottom = pane.body.scrollHeight - pane.body.scrollTop;
+    pane.body.prepend(frag);
+    pane.body.scrollTop = pane.body.scrollHeight - fromBottom;
+
+    pane.count += items.length;
+    st.pages++;
+    // The prepended lines have never been judged against the filter, and an entry they
+    // belong to may now span rows that were judged separately. One pass settles both.
+    repaint(pane);
+    st.empty = 0;
+  } else if (!st.error) {
+    /* An empty page is not the end of the log — it's a stretch where nothing was
+     * written. The window's own start IS the end, and `since` reaching the floor is how
+     * that's known; a pane following live has no floor, so give up after EMPTY_MAX
+     * widening attempts, by which point the last one reached back PAGE_MAX_SEC and
+     * found nothing. Either way the bar stops offering more. */
+    st.empty++;
+    if (since <= floor || st.empty >= EMPTY_MAX) st.exhausted = true;
+  }
+
+  st.loading = false;
+  paintOlderBar(pane);
+  track("page_older", {
+    via, pages: st.pages, lines: items.length, span_sec: until - since,
+    merged: pane.merged, exhausted: st.exhausted,
+  });
+}
+
+/** The bar above a pane's body: what paging is doing, and the way to ask for more
+ *  without scrolling (a pane too short to scroll still has history behind it). */
+function paintOlderBar(pane) {
+  const bar = pane.olderEl;
+  if (!bar) return;
+  const st = pane.older;
+  const show = pane.body.children.length > 0;
+  // The body reserves room for the bar rather than being covered by it — it sits over
+  // a scroll container, so anything underneath is the oldest line the pane holds,
+  // which is precisely the line someone scrolling up is trying to read.
+  bar.parentElement?.classList.toggle("has-older", show);
+  if (!show) return void (bar.hidden = true);
+  bar.classList.toggle("busy", st.loading);
+  if (st.loading) { bar.hidden = false; bar.textContent = "loading older…"; bar.disabled = true; return; }
+  if (st.error) { bar.hidden = false; bar.textContent = `↑ ${st.error} · retry`; bar.disabled = false; return; }
+  if (st.full) {
+    bar.hidden = false;
+    bar.disabled = true;
+    bar.textContent = `${fmtCount(MAX_ROWS)} lines loaded · narrow the window to read further`;
+    return;
+  }
+  if (st.exhausted) {
+    bar.hidden = false;
+    bar.disabled = true;
+    bar.textContent = range.since ? "start of the window" : "nothing older found";
+    return;
+  }
+  bar.hidden = false;
+  bar.disabled = false;
+  bar.textContent = "↑ load older";
+}
+
+/** Scrolling near the top asks for the next page. Bound per pane in `createPane`. */
+function onPaneScroll(pane) {
+  if (pane.body.scrollTop <= PAGE_TRIGGER_PX) loadOlder(pane, { via: "scroll" });
+}
+
+/** One row, built but not placed. Shared by the live path below and by the pages
+ *  `loadOlder` prepends — a line has to look and behave identically whether it
+ *  arrived on a subscription or was fetched later by scrolling back to it. */
+function renderLine(pane, member, evt) {
   const line = el("div", `line${evt.stream === "stderr" ? " err" : ""}`);
   if (member.colour) line.classList.add(`h${member.colour}`);
   // Kept on the element because the filter re-runs over the DOM, not over a model —
@@ -1840,6 +2243,27 @@ function appendLine(pane, member, evt, { batched = false, key = null } = {}) {
   line.append(renderMessage(evt.message, evt.runs));
   // Kept off the element rather than read back out of it — see `lineData`.
   lineData.set(line, { text: evt.message, runs: evt.runs });
+  /* The sort key goes on every line, not just a merged pane's.
+   *
+   * `placeLine` sets it too, but only when it was given one — which is never for a
+   * single-member pane, since nothing there needs ordering. That left the common case
+   * with no timestamp on the row at all, and `bodySpan` reads exactly this to know
+   * where a pane's history starts: paging would have done nothing, silently, on every
+   * pane that isn't combining hosts. Same value either way, so the two don't fight. */
+  const key = tsKey(evt.ts);
+  if (key) line.dataset.key = key;
+  return line;
+}
+
+function appendLine(pane, member, evt, { batched = false, key = null } = {}) {
+  // The first line of a window is the moment the skeleton has served its purpose.
+  if (pane.loading) hideLoading(pane);
+  // Only autoscroll if the reader is already at the bottom — scrolling up to
+  // read something shouldn't get yanked away by the next line. In a batch the
+  // caller does this once, around the whole batch.
+  const atBottom = batched ? false : nearBottom(pane.body);
+
+  const line = renderLine(pane, member, evt);
   /* A non-matching line is hidden, not dropped: clearing the filter has to bring the
    * context straight back, and it can't if the line was never added. Trimming still
    * counts it, so the buffer means the same thing whatever the filter is.
@@ -1880,7 +2304,21 @@ function appendLine(pane, member, evt, { batched = false, key = null } = {}) {
   // Cheap when nothing is filtered, and only over an entry that is actually growing.
   if (hidingLocally() && sibling) rejudgeEntry(pane, group);
 
-  if (++pane.count > MAX_LINES) {
+  /* The trim takes from the TOP, which is exactly where a loaded page lives — so on a
+   * pane that has been scrolled back it would throw away the history just fetched, on
+   * the next live line, while the reader is looking at it.
+   *
+   * So the ceiling rises once anything has been paged in: MAX_LINES for a pane that has
+   * only ever followed, MAX_ROWS for one holding history somebody went and got. Both
+   * are still ceilings — a paged pane that keeps receiving lines does eventually eat
+   * its own scrollback rather than growing without bound, and `loadOlder` stops adding
+   * to it well before that.
+   *
+   * Deliberately NOT conditioned on where the reader is scrolled: that would be a
+   * layout read per line, which is the whole cost the batching above exists to avoid,
+   * and it would make a pane too short to scroll (always "at the bottom") discard the
+   * page the moment it arrived. */
+  if (++pane.count > (pane.older.pages > 0 ? MAX_ROWS : MAX_LINES)) {
     const dropped = pane.body.firstChild;
     if (dropped && !dropped.classList?.contains("filtered")) pane.shown = Math.max(0, (pane.shown ?? 0) - 1);
     dropped?.remove();
@@ -2107,14 +2545,28 @@ function sizeScrub() {
     $("#scrub-readout").hidden = true;
     return;
   }
-  /* The right edge only advances to "now" while the whole span is selected.
+  /* The right edge is now, always — except under a drag in progress.
    *
-   * Re-scaling changes what every position means, so moving it under a chosen window
-   * slides that window sideways — which is what made the handles jump whenever a
-   * pane was attached or a late probe landed. Held still, a selected window keeps a
-   * stable scale for as long as it's being read. */
-  const following = range.since === null && range.until === null;
-  const to = scrubSpan && !following ? scrubSpan.to : nowSec();
+   * Re-scaling changes what every position means, so it used to be held still for as
+   * long as any window was selected, to stop a chosen window sliding sideways under
+   * its own handles. That fixed the jumping and introduced something worse: the scale
+   * stopped tracking time while you sat and read, so the stop labelled "now" meant
+   * whenever you had left live. An hour dragged off the right of that track was an
+   * hour ending *then* — and because the right handle at the stop still means "follow
+   * live", the window you actually got ran from there to the real now. Sit in a
+   * window for three hours and asking for the last hour hands you four.
+   *
+   * The window doesn't slide, because it isn't stored as a pair of positions: `range`
+   * holds absolute timestamps, and `syncScrubFromRange` at the end of this function
+   * re-derives the handles from them on every rescale. The selection stays where it
+   * is in TIME and moves on the track, which is the honest way round — a window three
+   * hours back should drift leftwards as the track's reach grows.
+   *
+   * A drag is the one case that still holds the scale still: rescaling mid-gesture
+   * would move the ground under the handle being dragged, and `syncScrubFromRange`
+   * (which bails while `scrubBusy`) can't put it back afterwards. It resumes tracking
+   * on release. */
+  const to = scrubBusy && scrubSpan ? scrubSpan.to : nowSec();
   scrubSpan = { from: Math.min(...olds), to };
   /* How far apart the handles may get, on this scale. The cap bounds a window's
    * width, so the track keeps its full reach — every moment of history is still
@@ -2362,9 +2814,9 @@ function commitScrub() {
   const until = hi >= SCRUB_MAX ? null : scrubToTime(hi);
 
   /* A window that ends at "live" ends at NOW, not at the track's right edge — and the
-   * track's right edge is frozen for as long as a window is selected, so the two drift
-   * apart while you sit and read. A day-wide selection on a track that stopped moving
-   * an hour ago is a 25-hour window, and would come back trimmed.
+   * right edge is held still for the length of the drag (see `sizeScrub`), so the two
+   * separate by however long the gesture took. Small, but a selection already at the
+   * cap is pushed over it by exactly that much and would come back trimmed.
    *
    * Pull it in here instead, and move the handle to match. The rule is unchanged; what
    * this buys is that the handles never describe a window you don't get. */
@@ -2521,6 +2973,9 @@ function startApp() {
    * mounted, which is not something to print in front of a dashboard nobody has
    * signed into yet. No-ops unless the server is in live-edit mode. */
   setupEdit();
+  // Same reasoning: the rules are this box's configuration, including the channels
+  // they deliver to, and the count alone says how much is armed here.
+  setupAlertsButton();
 }
 
 function showGate(state) {

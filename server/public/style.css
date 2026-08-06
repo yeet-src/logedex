@@ -367,9 +367,68 @@ button:active { background: var(--line); }
   color: var(--on-accent);
 }
 
+/* Static helper text — the note under the custom range form. Not the transient kind;
+ * those are `.toast` below. */
 .hint { color: var(--dim); }
 /* Bad news is the brightest grey, not a hue — see the note on the ramp up top. */
 .hint[data-kind="bad"] { color: var(--hi); }
+
+/* ── toasts ─────────────────────────────────────────────────────────────────── */
+/* What just happened, bottom right. Stacked oldest-first so a new one appears nearest
+ * the corner, which is where the previous one just was — the eye doesn't have to go
+ * looking, and a burst reads in the order it happened.
+ *
+ * `pointer-events: none` on the stack and `auto` on each toast: the gaps between them
+ * are over log lines, and a column of dead space down the corner of a pane you're
+ * trying to scroll would be a worse bug than the one this fixes. */
+.toasts {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 80;                  /* under the edit panel (90) and the login gate (100) */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 6px 10px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  box-shadow: 3px 3px 0 var(--shadow);
+  color: var(--fg);
+  font-size: var(--ui-sm);
+  cursor: pointer;
+  /* Long messages wrap rather than being clipped: a server error is the longest thing
+   * that lands here and the tail of it is usually the part that says what broke. */
+  overflow-wrap: anywhere;
+  animation: toast-in 120ms ease-out;
+}
+
+/* Bad news is the brightest grey plus an edge, not a hue — the same rule as `.hint`,
+ * and the same reason: the palette's one colour is the accent, and errors borrowing it
+ * would make "something failed" and "this is the control you want" look alike. */
+.toast[data-kind="bad"] {
+  color: var(--hi);
+  border-color: var(--hi);
+}
+
+.toast.out { opacity: 0; transition: opacity 180ms ease-in; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Motion is decoration here — the message is the message. Fading still happens, since
+ * the removal is on a timer either way and an instant vanish reads as a glitch. */
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
 
 /* ── the login gate ────────────────────────────────────────────────────────── */
 /* Structure, proportions and flow lifted from httpwatch's gate — a centred card, a
@@ -1290,6 +1349,43 @@ label.picker-row:hover { background: var(--panel-2); }
   padding: 6px 0;
 }
 
+/* ── paging backwards ───────────────────────────────────────────────────────── */
+/* The strip along the top of a pane that has more history behind it. Floated over the
+ * body rather than living in it: `appendLine`, the line trim and `repaint` all walk
+ * `.pane-body`'s children and would count a row in there as a log line.
+ *
+ * Full width and clickable, because scrolling is not the only way to ask — a pane too
+ * short to scroll still has hours behind it, and a page that came back empty leaves
+ * someone at the top with nothing to scroll against. */
+.pane-older {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  padding: 3px 8px;
+  border: none;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--dim);
+  font-size: var(--ui-sm);
+  text-align: center;
+  cursor: pointer;
+}
+
+.pane-view.has-older .pane-body { padding-top: 26px; }
+.pane-older:disabled { cursor: default; }
+.pane-older:not(:disabled):hover { color: var(--fg); }
+/* Loading says so by pulsing rather than by moving anything: the strip sits directly
+ * above lines that are about to shift down by the height of a page, and an animation
+ * with layout in it would read as the content already moving. */
+.pane-older.busy { animation: older-pulse 1.1s ease-in-out infinite; }
+
+@keyframes older-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
 /* ── the loading skeleton ──────────────────────────────────────────────────── */
 /* Placeholder rows in the shape of log lines, held over the body while a window is
  * being fetched. Opaque, because it covers the moment between the old window's lines
@@ -1590,7 +1686,11 @@ label.picker-row:hover { background: var(--panel-2); }
 /* Timestamp ordering is only as good as the hosts' clocks — say so when they
  * disagree, rather than presenting a confident wrong order. Same treatment for a
  * window the host trimmed: both are "what's on screen isn't quite what you asked
- * for", and they read as one class of warning because they are one. */
+ * for", and they read as one class of warning because they are one.
+ *
+ * A pane holding only the tail of its window is NOT in this class and has no badge:
+ * the strip at the top of the body already says there's more above and fetches it,
+ * which is the same fact plus the way out of it. */
 .pane-skew, .pane-capped {
   flex: none;
   padding: 0 5px;
@@ -1631,6 +1731,32 @@ label.picker-row:hover { background: var(--panel-2); }
   color: var(--accent);
 }
 .edit-btn:hover { border-color: var(--accent); color: var(--accent); filter: brightness(1.1); }
+
+/* ── the top-bar bell ───────────────────────────────────────────────────────── */
+/* Every alert rule on this box. An icon rather than a word because it's the same bell
+ * that arms a rule in a pane header, and the two being the same glyph is what says
+ * they're the same feature seen from two places. */
+.alerts-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  color: var(--dim);
+}
+.alerts-btn:hover { color: var(--fg); }
+
+/* The count, not a dot: "how many alerts are armed on this box" is a number someone
+ * wants, and a bare dot would only say "some". Absent at zero — a dashboard with
+ * nothing armed shouldn't carry a badge saying so. */
+.alerts-count {
+  font-size: var(--ui-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+/* Wider than a pane's picker: these rows carry the host and container as well as the
+ * pattern, since a rule found here isn't attached to anything you're looking at. */
+.picker.alerts-list { max-width: 620px; }
 
 .edit-panel {
   position: fixed;
@@ -1862,8 +1988,8 @@ label.picker-row:hover { background: var(--panel-2); }
    * piece of text in this header that matters most stayed near-black on the blue.
    *
    * `.bar` gets away without this by accident: every text node in it — the wordmark, the
-   * inputs, the hint — names its own colour, so there is nothing inheriting. This header has
-   * exactly one thing that inherits, and it's the container's name. */
+   * inputs, the range note — names its own colour, so there is nothing inheriting. This
+   * header has exactly one thing that inherits, and it's the container's name. */
   color: var(--fg);
   --panel-2: oklch(.40 .17 267);    /* #1f3aa1 — the header itself */
   --hi: oklch(.97 .012 250);        /* stderr, errors, a hovered control */

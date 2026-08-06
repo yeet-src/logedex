@@ -19,6 +19,44 @@
 
 export const DEFAULT_MAX_WINDOW_SEC = 24 * 3600;
 
+/* The other bound on a request, and the one that does the real work.
+ *
+ * A window is bounded by width, but width says nothing about volume: "the last 15
+ * minutes" of a container writing two lines a second is 1,800 lines, and of one
+ * writing two thousand it's 1.8 million. Both are inside the cap above, and only
+ * one of them is a reasonable thing to put on a wire.
+ *
+ * So a request also carries how many lines the far end can actually hold, and docker
+ * applies it as `tail` — the NEWEST n within the window. That number is not a
+ * server-side guess: it's the viewer's own buffer size, because the alternative is
+ * shipping lines whose entire fate is to be dropped on arrival. A 15-minute window on
+ * a chatty container measured 76,843 lines delivered to fill a pane that holds 2,000.
+ *
+ * Same reason as the width cap for living in shared/: the browser sizes the request
+ * from its buffer, the server bounds whatever arrives, and the tests pin both.
+ *
+ * The trade is real and is the reason this took a decision. `tail` is applied AFTER
+ * `since`, so a bounded request can come back holding less than the window asked for
+ * — the newest 2,000 lines of it rather than all of it. That has to be *said*, or it
+ * reads as a broken time filter. The viewer says it: `reportTrimmed` in the dashboard
+ * compares the oldest line it holds against the window it asked for, and names the
+ * time the pane really starts. Shipping everything and dropping it silently on
+ * arrival was the same lie, told more expensively. */
+export const DEFAULT_MAX_LINES = 2000;
+
+/**
+ * Bound the line count a request may ask its source to send.
+ *
+ * @param {unknown} n   the requested count; anything unusable falls back to the default
+ * @param {number} max  the ceiling this host will honour
+ * @returns {number} a positive integer line count
+ */
+export function clampLimit(n, max = DEFAULT_MAX_LINES) {
+  const want = Math.floor(Number(n));
+  if (!Number.isFinite(want) || want <= 0) return max;
+  return Math.min(want, max);
+}
+
 /* Two constants that exist because the cap's edge moves with the clock, and a
  * boundary that moves is a boundary two callers will land on either side of.
  *

@@ -21,7 +21,7 @@
 // are both information the operator wants, not faults to paper over. Re-attaching
 // spawns a fresh isolate.
 
-import { clampWindow, DEFAULT_MAX_WINDOW_SEC } from "../shared/limits.js";
+import { clampLimit, clampWindow, DEFAULT_MAX_LINES, DEFAULT_MAX_WINDOW_SEC } from "../shared/limits.js";
 import { execYeet, socketArgs, startIsolate } from "./isolate.js";
 
 const DEFAULT_TAIL = 500;
@@ -50,10 +50,12 @@ const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "").replace(/^[│
  * @param {string} [cfg.userSocket]
  * @param {number} [cfg.tail]       events kept per container for backfill
  * @param {number} [cfg.maxWindowSec] widest history one stream may ask for; 0 = no cap
+ * @param {number} [cfg.maxLines]   most lines one stream may ask the source to replay
  */
 export function createLogs(cfg) {
   const tailSize = Math.max(0, cfg.tail ?? DEFAULT_TAIL);
   const maxWindowSec = cfg.maxWindowSec ?? DEFAULT_MAX_WINDOW_SEC;
+  const maxLines = cfg.maxLines ?? DEFAULT_MAX_LINES;
   /** @type {Map<string, {container:string, ring:object[], subs:Set<Function>, handle:any,
    *                      state:string, error:string|null, idleTimer:any, seq:number,
    *                      lastLog:string|null}>} */
@@ -92,7 +94,11 @@ export function createLogs(cfg) {
         userSocket: cfg.userSocket,
         scriptArgs: [
           "--container", s.container,
-          "--tail", String(Math.min(tailSize || 200, 500)),
+          // The viewer's buffer size when it sent one, this host's own tail when it
+          // didn't. A plain live tail (no window) keeps the smaller number: there is
+          // no history being replayed, so it only sizes the catch-up a late viewer
+          // gets, and the ring below can't hand out more than it holds anyway.
+          "--tail", String(s.limit || Math.min(tailSize || 200, 500)),
           ...(s.since ? ["--since", String(s.since)] : []),
           ...(s.until ? ["--until", String(s.until)] : []),
           ...(s.find ? ["--find", s.find] : []),
@@ -138,10 +144,12 @@ export function createLogs(cfg) {
    * Watch one container's logs over a time window. `onEvent` is called with the
    * buffered tail first, then live events. The returned function detaches.
    *
-   * @param {{container:string, since?:number, until?:number, find?:string}} req
+   * @param {{container:string, since?:number, until?:number, find?:string, limit?:number}} req
    *   `since`/`until` are unix seconds; omit both for a plain live tail. An open
    *   range (no `until`) backfills from `since` and keeps following. `find` is a
-   *   search query applied at the source, so non-matching lines never travel.
+   *   search query applied at the source, so non-matching lines never travel, and
+   *   `limit` is how many lines the caller can hold — the newest that many inside
+   *   the window, so the rest never travel either (see shared/limits.js).
    *
    *   A window wider than `maxWindowSec` is trimmed here rather than refused — see
    *   shared/limits.js. This is the enforcement point, not the browser's copy of the
@@ -158,14 +166,26 @@ export function createLogs(cfg) {
     const since = win.since ?? 0;
     const until = win.until ?? 0;
     const find = String(req.find ?? "");
-    // The query joins the window in the stream's identity: two viewers searching
-    // for different things are asking the source for different lines and cannot
-    // share one subscription, exactly as with two different time windows.
-    const key = `${name}|${since}|${until}|${find}`;
+    /* How many lines the viewer can hold, bounding the backfill at the source.
+     *
+     * Only for an OPEN window. Without `since` there is no history to bound, and with
+     * `until` docker refuses to apply a tail and a window at once — it returns nothing
+     * at all, so asking for one would turn every closed window into an empty pane. The
+     * isolate enforces that too; this keeps the stream key and `yeet ps` honest about
+     * what was actually asked for.
+     *
+     * Clamped, not trusted: this arrives from a browser (or from anything else that
+     * can reach the endpoint), and it decides how much this host reads out of docker. */
+    const limit = since && !until ? clampLimit(req.limit, maxLines) : 0;
+    // The query and the line bound join the window in the stream's identity: two
+    // viewers searching for different things, or able to hold different amounts, are
+    // asking the source for different lines and cannot share one subscription —
+    // exactly as with two different time windows.
+    const key = `${name}|${since}|${until}|${find}|${limit}`;
     let s = streams.get(key);
     if (!s) {
       s = {
-        key, container: name, since, until, find,
+        key, container: name, since, until, find, limit,
         ring: [], subs: new Set(), handle: null,
         state: "starting", error: null, idleTimer: null, seq: 0, lastLog: null,
         extra: win.capped
@@ -206,7 +226,7 @@ export function createLogs(cfg) {
   function stats() {
     return [...streams.values()].map((s) => ({
       container: s.container, since: s.since || null, until: s.until || null,
-      find: s.find || null,
+      find: s.find || null, limit: s.limit || null,
       // The `since` above is the effective one; this says it isn't the one asked for.
       cappedFrom: s.extra?.capped?.requested ?? null,
       state: s.state, viewers: s.subs.size, buffered: s.ring.length,
@@ -289,7 +309,11 @@ export function createLogs(cfg) {
           name: isolateName(`oldest-${name}`),
           socket: cfg.socket,
           userSocket: cfg.userSocket,
-          scriptArgs: ["--container", name, "--since", "1", "--head", "1"],
+          // `--tail 0` is load-bearing: this reads from the START of the log, and a
+          // tail is applied last and would hand back the END of it instead — turning
+          // "the oldest line" into "the 200th-newest", and the slider's left edge
+          // into a few minutes ago on a container with days of history.
+          scriptArgs: ["--container", name, "--since", "1", "--head", "1", "--tail", "0"],
           onLine: (msg) => {
             if (msg.t === "log") finish(msg.ts ?? null);
             // A container that has logged nothing completes with no lines — a real

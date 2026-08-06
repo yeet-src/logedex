@@ -36,7 +36,6 @@
     <input id="host-label" type="text" placeholder="label (optional)" aria-label="host label">
     <button type="submit">add host</button>
   </form>
-  <span id="hint" class="hint" role="status"></span>
 
   <!-- Which skin the app wears: yeet (dark, matches yeet.cx) or pokédex (light, after the
        name). A two-state button rather than a select, because there are two of them and
@@ -49,6 +48,16 @@
        rewrite. Hidden by default so the button never appears on an ordinary run. -->
   <button type="button" id="edit-btn" class="edit-btn" hidden
           title="how to point an AI agent at this dashboard's source">live edit</button>
+
+  <!-- Every alert rule on this box, in one place. The bell in a pane's header is where a
+       rule is WRITTEN — it knows which streams you're looking at — but finding one again
+       meant remembering which container you wrote it against and opening that pane. A
+       rule outlives the pane it was created from, so the list of them belongs somewhere
+       that isn't attached to a pane. Deleting is the case that matters: an alert you
+       can't find is an alert you can't turn off. -->
+  <button type="button" id="alerts-btn" class="alerts-btn"
+          title="every alert rule on this box"
+          aria-label="alert rules"></button>
 
   <!-- The time range is global on purpose: one control moves every pane to the
        same window, which is what makes streams from different hosts comparable. -->
@@ -196,6 +205,13 @@
     <p class="empty">Pick a container to attach its logs.</p>
   </section>
 </main>
+
+<!-- Transient messages: what just happened, and whether it worked. Bottom right rather
+     than in the top bar, where they used to be a single line that each new message wiped
+     — near where the eye already is, and several can stand at once. `polite` so a screen
+     reader finishes the sentence it's on before reading one out; these are confirmations,
+     never the only place something is said. -->
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
 <script type="module" src="/app.js"></script>
 </body>

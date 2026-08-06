@@ -15,7 +15,7 @@ function inZone(tz, fn) {
   process.env.TZ = tz;
   try { fn(); } finally { process.env.TZ = prev; }
 }
-import { KEY_MAX, blockCross, clockSpread, compareLines, localTime, memberLabels, mergeCandidates, mergeWatermark, orderBatch, posToTime, pushWithin, splitAtWatermark, timeToPos, tsKey } from "./order.js";
+import { KEY_MAX, PAGE_MAX_SEC, PAGE_MIN_SEC, blockCross, clockSpread, compareLines, localTime, memberLabels, mergeCandidates, mergePage, mergeWatermark, orderBatch, pageSpan, posToTime, pushWithin, splitAtWatermark, timeToPos, tsKey } from "./order.js";
 
 // ── scrubber mapping ────────────────────────────────────────────────────────
 test("scrubber edges map to the ends of the span", () => {
@@ -434,4 +434,55 @@ test("a member with no host label falls back to its id", () => {
     memberLabels([{ hostId: "box-two-lan-8080", container: "api" }, M("web-01", "api")]),
     ["box-two-lan-8080", "web-01"],
   );
+});
+
+// ── paging backwards ────────────────────────────────────────────────────────
+/* The estimator decides how far back one "load older" reaches. Getting it wrong is
+ * not a correctness bug — the page is whatever it is — but a bad guess is felt: too
+ * small and scrolling back is a stutter of near-empty pages, too large and one scroll
+ * asks a production host to replay hours. */
+
+test("a page aims at the target line count, from the density on screen", () => {
+  // 2000 lines over 600s is 0.3s a line; 1000 more lines is 300s of history.
+  assert.equal(pageSpan(600, 2000, 1000), 300);
+  // Half the rate, so twice the reach for the same target.
+  assert.equal(pageSpan(1200, 2000, 1000), 600);
+});
+
+test("a quiet container reaches further back than a chatty one", () => {
+  const chatty = pageSpan(60, 2000, 1000);    // ~33 lines a second
+  const quiet = pageSpan(3600, 200, 1000);    // ~18 seconds a line
+  assert.ok(quiet > chatty, `${quiet} should reach further back than ${chatty}`);
+});
+
+test("the reach is clamped at both ends", () => {
+  // A burst: thousands of lines in a moment would otherwise ask for a fraction of a
+  // second and page forever.
+  assert.equal(pageSpan(1, 100000, 1000), PAGE_MIN_SEC);
+  // A container that logs once a day would otherwise ask for years in one request.
+  assert.equal(pageSpan(86400, 2, 1000), PAGE_MAX_SEC);
+});
+
+test("nothing to measure falls back rather than dividing by zero", () => {
+  assert.equal(pageSpan(0, 1000, 1000), 300);      // every line in the same second
+  assert.equal(pageSpan(600, 1, 1000), 300);       // a single line spans nothing
+  assert.equal(pageSpan(600, 2000, 1000, 42), 300, "fallback is only for the unmeasurable");
+  assert.equal(pageSpan(NaN, NaN, 1000, 120), 120);
+});
+
+test("a page merges its members by timestamp, stably", () => {
+  const items = [
+    { key: "2026-08-05T10:00:02.000000000", member: 1, seq: 0 },
+    { key: "2026-08-05T10:00:01.000000000", member: 0, seq: 0 },
+    { key: "2026-08-05T10:00:02.000000000", member: 0, seq: 1 },
+    { key: "2026-08-05T10:00:02.000000000", member: 0, seq: 0 },
+  ];
+  // The earliest stamp first, then ties broken by member, then by arrival.
+  assert.deepEqual(mergePage(items).map((i) => [i.member, i.seq]), [[0, 0], [0, 0], [0, 1], [1, 0]]);
+});
+
+test("merging a page leaves the caller's array alone", () => {
+  const items = [{ key: "b", member: 0, seq: 0 }, { key: "a", member: 0, seq: 1 }];
+  mergePage(items);
+  assert.equal(items[0].key, "b", "sorted a copy, not the input");
 });

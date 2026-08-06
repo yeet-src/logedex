@@ -333,3 +333,57 @@ export function clockSpread(offsets) {
   if (known.length < 2) return null;
   return Math.max(...known) - Math.min(...known);
 }
+
+// ── paging backwards through history ────────────────────────────────────────
+/* How far back to reach for the next page of older lines.
+ *
+ * Docker gives no way to ask for "the newest N lines before T" — `tail` is applied to
+ * the whole log before `until` narrows it, so the two together return nothing at all
+ * (measured; see the note in agent/logstream.js). The only backwards primitive is a
+ * time slice, `since = T - Δ, until = T`, and Δ has to be chosen before we know how
+ * many lines it holds.
+ *
+ * So estimate it from the density we can already see: the lines on screen span a known
+ * number of seconds, and the next stretch of the same log is likely to be similar. Aim
+ * for `target` lines and let the next page correct the guess from its own density.
+ *
+ * Bounded at both ends, because the estimate is a guess about a container that may
+ * have been idle for an hour or may have burst. Too small and scrolling back becomes a
+ * long series of empty pages; too large and one page asks a host to replay hours.
+ */
+export const PAGE_MIN_SEC = 15;
+export const PAGE_MAX_SEC = 6 * 3600;
+
+/**
+ * @param {number} spanSec   seconds between the oldest and newest line we hold
+ * @param {number} lines     how many lines that span holds
+ * @param {number} target    lines we would like the next page to contain
+ * @param {number} [fallback] used when there's nothing to measure (one line, no span)
+ * @returns {number} Δ in seconds, clamped to [PAGE_MIN_SEC, PAGE_MAX_SEC]
+ */
+export function pageSpan(spanSec, lines, target, fallback = 300) {
+  const clamp = (n) => Math.max(PAGE_MIN_SEC, Math.min(PAGE_MAX_SEC, Math.round(n)));
+  // A span of zero over many lines is a burst — every line sharing one second says
+  // nothing about the rate, and dividing by it would ask for the minimum forever.
+  if (!(spanSec > 0) || !(lines > 1) || !(target > 0)) return clamp(fallback);
+  return clamp((spanSec / lines) * target);
+}
+
+/**
+ * Merge already-loaded pages from several members into one reading order.
+ *
+ * The live path can't do this — it holds lines back behind a watermark because more
+ * may still arrive (see `splitAtWatermark`). A page is finite and complete before it
+ * is placed, so every line that belongs in this stretch is already in hand and the
+ * order is just a sort. Stable on ties by member and then by arrival, so lines sharing
+ * a timestamp keep a fixed, reproducible order rather than shuffling per page.
+ *
+ * @param {Array<{key:string, member:number, seq:number}>} items
+ * @returns {Array} the same items, in reading order
+ */
+export function mergePage(items) {
+  return [...items].sort((a, b) =>
+    (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+    || a.member - b.member
+    || a.seq - b.seq);
+}

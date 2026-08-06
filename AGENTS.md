@@ -36,10 +36,10 @@ minute; that alone is not a fault. If `/api/containers`
 comes back with an empty list or an error per host, stop and read
 [Diagnosing](#diagnosing) rather than editing anything.
 
-> **This has to be real Linux with a real Docker socket.** On Docker Desktop, OrbStack, or
-> any other VM-backed Docker, you'll list the *VM's* containers rather than the host's,
-> which looks like it works and answers the wrong question. Check `uname -s` before you
-> start, and say so instead of proceeding.
+> **On Docker Desktop, OrbStack, or any other VM-backed Docker, use `make up NET=`.** The
+> socket is the same daemon your `docker ps` talks to, so the container list is the right
+> one, but host networking isn't real on those platforms and the default `NET=host` leaves
+> the port unpublished. Check `uname -s` before you start.
 
 `make edit` is `make up` plus a printout of where the running app's source landed on the
 host. That directory is where you work. See [The two loops](#the-two-loops).
@@ -87,7 +87,7 @@ agent/alert.js           the same, for a rule that runs with no tab open
 agent/caps.js            asks the daemon what this box can do (is Slack paired?)
 
 shared/search.js         query parsing + matching — runs in all three runtimes
-shared/limits.js         the window-width cap
+shared/limits.js         the window-width cap, and the line bound on one request
 shared/alertrule.js      an alert rule's shape, limits, and adversarial regex probes
 
 server/index.js          HTTP routes for both roles
