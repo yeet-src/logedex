@@ -145,12 +145,19 @@ const config = {
    * us.posthog.com. `POSTHOG_KEY=""` turns it off outright; POSTHOG_KEY=… points it at
    * another project.
    *
-   * Nothing about the logs is sent either way, and that is a much sharper constraint
-   * here than the usual one — every event this app raises is a count or a kind, never a
-   * container, a host, an image, a filter term or a line. The three PostHog features
-   * that would read the screen on their own (autocapture, session recording, exception
-   * autocapture) are all off. See public/analytics.js, which is where a change to any of
-   * that would have to be argued for.
+   * No log text is sent either way, and that is a much sharper constraint here than the
+   * usual one — every event this app raises is a count or a kind, never a filter term or a
+   * line. Autocapture and exception autocapture, both of which would read the screen into
+   * event properties, are off.
+   *
+   * Session replay is ON. It records this product's own UI — panes, buttons, container and
+   * host names — and redacts the logs inside it: the message text, any pattern typed
+   * against it, and the one tooltip that can quote a matched line. See public/analytics.js,
+   * where that list lives; it is a list of PLACES, so a new pane that renders log text
+   * outside the log line is the way it silently stops holding.
+   *
+   * `POSTHOG_KEY=""` is the kill switch for replay too, since it stops the library ever
+   * loading — there is no separate replay flag to reach for in a hurry.
    *
    * Several of these dashboards report into the SAME PostHog project, so every event says
    * which product it came from — `app` below, stamped on the way out by analytics.js. It is

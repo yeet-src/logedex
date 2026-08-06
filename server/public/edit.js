@@ -197,20 +197,43 @@ export async function setupEdit() {
 
   watchForNewAssets(info.assetVersion);
 
+  /* Copying, on an origin that usually isn't secure.
+   *
+   * `navigator.clipboard` exists only in a secure context — HTTPS or localhost — and
+   * this dashboard is normally reached at http://box.lan:8080, which is neither. So on
+   * the common path the modern API isn't merely likely to fail, it is not there at all,
+   * and this button used to spend its whole life telling people to press ⌘C.
+   *
+   * `document.execCommand("copy")` is deprecated and still works everywhere, including
+   * insecure origins. It has one hard requirement: it must run SYNCHRONOUSLY inside the
+   * user gesture. That's why the branch is chosen up front on `isSecureContext` rather
+   * than by trying the promise first and falling back — awaiting anything before it
+   * spends the gesture, and the fallback would then fail for a second reason.
+   *
+   * The textarea stays the real interface underneath both: it's selected either way, so
+   * the manual keystroke is always available and the message is honest when neither
+   * path worked. */
+  const copyViaSelection = () => {
+    textEl.focus();
+    textEl.select();
+    try { return document.execCommand("copy"); } catch { return false; }
+  };
+
   copyBtn.addEventListener("click", async () => {
-    // navigator.clipboard is unavailable on a plain-HTTP origin that isn't localhost,
-    // which is exactly how this dashboard is usually reached (http://box.lan:8080).
-    // So the textarea is the real interface and the button is the convenience: on
-    // failure, say so and leave the text selected rather than reporting a copy that
-    // didn't happen.
-    try {
-      await navigator.clipboard.writeText(brief);
-      copyBtn.textContent = "copied";
-    } catch {
-      textEl.focus();
-      textEl.select();
-      copyBtn.textContent = "press ⌘/ctrl+C";
+    let ok = false;
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(brief);
+        ok = true;
+      } catch {
+        ok = false;   // permission refused, or a browser that lied about the context
+      }
+    } else {
+      ok = copyViaSelection();
     }
+    // Left selected on failure, so the keystroke it asks for actually does something.
+    if (!ok) textEl.select();
+    copyBtn.textContent = ok ? "copied" : "press ⌘/ctrl+C";
     setTimeout(() => { copyBtn.textContent = "copy"; }, 2000);
   });
 }
