@@ -1212,7 +1212,11 @@ function attach(members, { via = "sidebar" } = {}) {
   } else {
     head.append(ball);
   }
-  head.append(el("span", "pane-container", title));
+  // The name elides in a narrow pane (see `.pane-container`), so carry the whole of it
+  // on the element itself — same contract as the chips in a combined pane's legend.
+  const nameEl = el("span", "pane-container", title);
+  nameEl.title = title;
+  head.append(nameEl);
 
   const pane = {
     key, node, body: null, members: [], count: 0, merged,

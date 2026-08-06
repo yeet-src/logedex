@@ -1278,9 +1278,42 @@ label.picker-row:hover { background: var(--panel-2); }
   padding: 6px 10px;
   background: var(--panel-2);
   border-bottom: 1px solid var(--line);
+  /* The row is a fixed-width box that its contents give way inside, never one that
+   * grows to fit them. A narrow pane with a long name, a legend of five chips and two
+   * warning badges used to push the controls at the end past the pane's right edge and
+   * out over its neighbour — and because `.panes` scrolls on overflow, one crammed
+   * header made the whole row of panes scroll sideways.
+   *
+   * What holds it: everything text-ish below can shrink to nothing and elides (the
+   * name first — see `.pane-container`), and everything you can click is `flex: none`,
+   * so the buttons keep their size while the words around them give up theirs. This is
+   * the backstop for the case that outlasts even that. */
+  overflow: hidden;
 }
 
-.pane-container { font-weight: 600; letter-spacing: 0.03em; }
+/* Combine, alert, close — the end of the row, and the reason everything else in it
+ * elides. They are the pane's only controls, so they are the one group that never gives
+ * up a pixel: no shrinking, and nothing that could push them out of the box. `.add-stream`
+ * and `.alert-btn` say `flex: none` themselves; `×` is `.rm`, shared with the host list,
+ * so it gets it here rather than there. */
+.pane-head > button { flex: none; }
+
+/* First to give way when the row runs out of room, and by a wide margin — a name is the
+ * one thing here you can still recognise from half of it, and the alternative is pushing
+ * the controls at the end of the row off the pane. The full name is on the element's
+ * `title` (set in `attach`) whatever the box does to it.
+ *
+ * Not all the way to nothing, though: a couple of characters plus the ellipsis is the
+ * point where it stops being a shortened name and starts being a stray glyph. */
+.pane-container {
+  flex: 0 8 auto;
+  min-width: 3ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
 
 /* The interleave affordance. Quiet until hovered — it sits in every pane's header,
  * so at rest it has to read as available rather than as something to be dealt with,
@@ -1303,10 +1336,21 @@ label.picker-row:hover { background: var(--panel-2); }
 /* The glyph inherits the button's colour through `stroke: currentColor`, so hover and
  * focus need no rule of their own. */
 .add-stream svg { display: block; }
-.pane-host { color: var(--dim); font-size: var(--ui-sm); }
+/* Elides after the container name has already given up what it can: on a single-stream
+ * pane the host is the other half of the identity, so it goes second, not first. */
+.pane-host {
+  flex: 0 6 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: var(--ui-sm);
+}
 
 /* The container's own state, from the host's container list. */
 .pane-docker {
+  flex: none;
   padding: 0 5px;
   border: 1px solid var(--line);
   color: var(--dim);
@@ -1318,8 +1362,12 @@ label.picker-row:hover { background: var(--panel-2); }
 .pane-docker[data-state="paused"], .pane-docker[data-state="restarting"] { color: var(--fg); }
 
 /* What OUR stream of it is doing — a different question. */
+/* `flex: 1` is what takes the slack and pushes the controls to the end of the row. It
+ * shrinks too when there is no slack left to take, just more reluctantly than the name
+ * and the host beside it — "streaming" is the pane's live status and worth the pixels. */
 .pane-state {
-  flex: 1;
+  flex: 1 2 auto;
+  min-width: 0;
   color: var(--dim);
   font-size: var(--ui-sm);
   text-align: right;
@@ -1659,16 +1707,22 @@ label.picker-row:hover { background: var(--panel-2); }
 .line.h5 { border-left-color: var(--h5); } .line.h5 .who { color: var(--h5); }
 .line.h6 { border-left-color: var(--h6); } .line.h6 .who { color: var(--h6); }
 
-.pane-legend { display: flex; gap: 8px; align-items: center; }
+/* Where a combined pane's header runs out of room: five chips at their natural width are
+ * the biggest single thing in that row. The chips shrink together and each one's label
+ * elides, so the coloured dots — the part that actually maps a line to a stream — stay
+ * put and stay countable. The full identity is on each chip's `title`. */
+.pane-legend { display: flex; gap: 8px; align-items: center; flex: 0 6 auto; min-width: 0; }
 
 .pane-chip {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
   font-size: var(--ui-sm);
   color: var(--dim);
 }
-.chip-dot { width: 9px; height: 9px; }
+.chip-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-dot { flex: none; width: 9px; height: 9px; }
 .pane-chip.h1 .chip-dot { background: var(--h1); }
 .pane-chip.h2 .chip-dot { background: var(--h2); }
 .pane-chip.h3 .chip-dot { background: var(--h3); }
@@ -1691,8 +1745,16 @@ label.picker-row:hover { background: var(--panel-2); }
  * A pane holding only the tail of its window is NOT in this class and has no badge:
  * the strip at the top of the body already says there's more above and fetches it,
  * which is the same fact plus the way out of it. */
+/* These elide rather than hold their width: both say the same thing in their `title` at
+ * full length, and a badge that can't be squeezed is a badge that pushes the buttons at
+ * the end of the row off the pane. They give way after the name and the host, since
+ * unlike those two they are only here when something is actually wrong. */
 .pane-skew, .pane-capped {
-  flex: none;
+  flex: 0 4 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 0 5px;
   color: var(--hi);
   border: 1px solid var(--line-2);
