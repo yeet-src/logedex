@@ -1,3 +1,5 @@
+<!-- yeet:user-friendly-title: Query distributed logs -->
+
 # Logédex
 
 > **Container logs from every host you run, side by side in one browser tab.** Enter a host's URL, get its containers, attach the ones you care about (from any host), and read the streams next to each other.
