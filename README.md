@@ -7,7 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Linux-1793D1" alt="Linux">
   <img src="https://img.shields.io/badge/built%20with-yeet%20system%20graph-8A2BE2" alt="yeet system graph">
-  <img src="https://img.shields.io/badge/license-GPL--2.0-3DA639" alt="GPL-2.0">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-3DA639" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/deps-zero%20runtime%20npm-4fc1ff" alt="no runtime dependencies">
   <a href="https://discord.gg/JxVseaAVAU"><img src="https://img.shields.io/badge/chat-Discord-5865F2" alt="Discord"></a>
 </p>
@@ -484,7 +484,7 @@ Run the tests with `cd server && npm test`. Node's built-in runner, nothing to i
 
 ## License
 
-GPL-2.0
+Apache-2.0
 
 ---
 
